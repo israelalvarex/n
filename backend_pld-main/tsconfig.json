@@ -1,0 +1,33 @@
+{
+  "compilerOptions": {
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "resolvePackageJsonExports": true,
+    // El cliente de Prisma generado importa sus propios modulos con extension
+    // .ts explicita (import ... from "./internal/class.ts"). Sin estas dos
+    // opciones tsc copia esa extension tal cual al output compilado, y en
+    // runtime "require" busca un archivo .ts que nunca existe como .js con
+    // ese nombre exacto. rewriteRelativeImportExtensions reescribe .ts -> .js
+    // en el JS emitido; allowImportingTsExtensions es su requisito.
+    "allowImportingTsExtensions": true,
+    "rewriteRelativeImportExtensions": true,
+    "esModuleInterop": true,
+    "isolatedModules": true,
+    "declaration": false,
+    "removeComments": true,
+    "emitDecoratorMetadata": true,
+    "experimentalDecorators": true,
+    "allowSyntheticDefaultImports": true,
+    "target": "ES2023",
+    "sourceMap": true,
+    "types": ["node", "multer"],
+    "outDir": "./dist",
+    "incremental": true,
+    "skipLibCheck": true,
+    "strictNullChecks": true,
+    "forceConsistentCasingInFileNames": true,
+    "noImplicitAny": false,
+    "strictBindCallApply": false,
+    "noFallthroughCasesInSwitch": false
+  }
+}

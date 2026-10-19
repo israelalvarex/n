@@ -1,0 +1,82 @@
+{
+  "_comentario": [
+    "Datos de ejemplo. Ficticios a proposito: este archivo SI se sube al repo.",
+    "Para sembrar los reales, copia este archivo como seed-data.json (ignorado por git)",
+    "y sustituye los valores. La seed prefiere seed-data.json si existe."
+  ],
+  "company": {
+    "code": "DEMO",
+    "legalName": "Grupo Demostracion"
+  },
+  "businessUnits": [
+    { "code": "U01", "name": "Unidad Norte", "type": "casino" },
+    { "code": "U02", "name": "Unidad Sur", "type": "casino" },
+    { "code": "U03", "name": "Unidad Centro", "type": "casino" },
+    { "code": "U04", "name": "Unidad Oriente", "type": "casino" },
+    { "code": "U05", "name": "Unidad Poniente", "type": "casino" },
+    { "code": "U06", "name": "Unidad Costa", "type": "casino" },
+    { "code": "U07", "name": "Unidad Bajio", "type": "casino" },
+    { "code": "ONLINE", "name": "Online", "type": "online" }
+  ],
+  "superadmin": {
+    "name": "Administrador",
+    "email": "admin@example.com",
+    "jobTitle": "Administrador del sistema"
+  },
+  "departmentHeads": [
+    {
+      "name": "Persona Uno",
+      "email": "persona1@example.com",
+      "jobTitle": "Encargado de Renta, Servicios y Mantenimiento",
+      "departments": ["RENTA_SERVICIOS", "LIMPIEZA_MTTO"]
+    },
+    {
+      "name": "Persona Dos",
+      "email": "persona2@example.com",
+      "jobTitle": "Encargado de Sistemas",
+      "departments": ["LICENCIAMIENTO"]
+    },
+    {
+      "name": "Persona Tres",
+      "email": "persona3@example.com",
+      "jobTitle": "Encargado de Regalias y Accesorios",
+      "departments": ["REGALIAS_ACC"]
+    },
+    {
+      "name": "Persona Cuatro",
+      "email": "persona4@example.com",
+      "jobTitle": "Encargado de Recursos Humanos",
+      "departments": ["RH_GENTE", "RH_NOMINA"]
+    },
+    {
+      "name": "Persona Cinco",
+      "email": "persona5@example.com",
+      "jobTitle": "Encargado de Mercadotecnia",
+      "departments": ["MKT"]
+    },
+    {
+      "name": "Persona Seis",
+      "email": "persona6@example.com",
+      "jobTitle": "Encargado de Administracion y Finanzas",
+      "departments": ["ADM_VIATICOS", "GTOS_FIN", "ACTIVOS_DEP", "IMPUESTOS"]
+    },
+    {
+      "name": "Persona Siete",
+      "email": "persona7@example.com",
+      "jobTitle": "Encargado Juridico",
+      "departments": ["LEGAL"]
+    },
+    {
+      "name": "Persona Ocho",
+      "email": "persona8@example.com",
+      "jobTitle": "Gerente de Alimentos y Bebidas",
+      "departments": ["AYB"]
+    },
+    {
+      "name": "Persona Nueve",
+      "email": "persona9@example.com",
+      "jobTitle": "Encargado de Atencion a Clientes",
+      "departments": ["ATT_CLIENTES"]
+    }
+  ]
+}

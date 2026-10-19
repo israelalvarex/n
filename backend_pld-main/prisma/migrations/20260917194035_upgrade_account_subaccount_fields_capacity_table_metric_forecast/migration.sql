@@ -1,0 +1,3 @@
+-- AlterTable
+ALTER TABLE "metric_forecast" ALTER COLUMN "account" SET DATA TYPE VARCHAR(80),
+ALTER COLUMN "subaccount" SET DATA TYPE VARCHAR(80);

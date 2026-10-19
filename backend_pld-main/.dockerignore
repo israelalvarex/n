@@ -1,0 +1,33 @@
+# El Dockerfile hace COPY . . despues de instalar dependencias dentro del
+# contenedor. Sin este archivo, esa copia arrastra los artefactos LOCALES del
+# host (node_modules, generated/, dist/) por encima de los que el propio build
+# acaba de generar limpios, y eso fue justo lo que causo el crash de
+# 'Cannot find module ./internal/class.ts': el cliente de Prisma generado en
+# este disco quedo copiado encima del que genero el contenedor.
+node_modules
+generated
+dist
+coverage
+
+.git
+.gitignore
+.dockerignore
+
+.env
+.env.*
+!.env.example
+
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+.vscode
+.idea
+
+.DS_Store
+
+images
+docs
+
+test
+*.spec.ts

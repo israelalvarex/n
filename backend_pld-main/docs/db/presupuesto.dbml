@@ -1,0 +1,2047 @@
+// =============================================================================
+// Esquema de Presupuesto Anual (PTTO)
+// Derivado de: "PTTO 2026 - GPE AMULETOS.xlsx"
+// Notacion: DBML (dbdiagram.io / dbml-renderer). Tipos orientados a PostgreSQL.
+//
+// Idea general del modelo
+// -----------------------
+// El libro de Excel es una coleccion de "cedulas" (una hoja por familia de
+// gasto/ingreso). Cada cedula tiene categorias, y cada categoria tiene
+// renglones (conceptos) con 12 columnas mensuales + total.
+//
+// Ese patron se normaliza en 3 tablas centrales:
+//   presupuesto            -> cabecera (ejercicio + unidad de negocio + CC + escenario)
+//   presupuesto_partida    -> un renglon del Excel (concepto + referencia + factor)
+//   partida_mes            -> el valor de un mes (tabla de hechos)
+//
+// Las hojas con logica propia (nomina, materia prima AyB, regalias, TPV,
+// impuestos, activos) extienden ese nucleo con tablas de supuestos y drivers.
+// =============================================================================
+
+Project presupuesto_anual {
+  database_type: 'PostgreSQL'
+  Note: '''
+  Modelo de presupuesto anual para grupo de casinos y unidades de Alimentos y
+  Bebidas (AyB). Soporta captura por cedula, escenarios (base / deseado /
+  agresivo), versionado, control por centro de costo y calculo de impuestos
+  sobre juego.
+  '''
+}
+
+// =============================================================================
+// 1. CATALOGOS BASE
+// =============================================================================
+
+Enum mes_enum {
+  ene
+  feb
+  mar
+  abr
+  may
+  jun
+  jul
+  ago
+  sep
+  oct
+  nov
+  dic
+}
+
+Enum naturaleza_enum {
+  ingreso
+  gasto
+  costo_mp
+  nomina
+  impuesto
+  activo
+  depreciacion
+  indicador   [note: 'Renglon informativo, no suma al resultado financiero']
+}
+
+Enum escenario_enum {
+  base        [note: 'Solo aumentos por salario minimo / inflacion contractual']
+  deseado     [note: 'Incremento del 5% en percepciones y prestaciones']
+  agresivo    [note: 'Aumento generalizado por inflacion']
+}
+
+Enum estado_presupuesto_enum {
+  borrador
+  en_revision
+  autorizado
+  cerrado
+  reproyectado
+}
+
+// La frecuencia no es una etiqueta: define como se reparten los 12 meses a
+// partir de la cantidad y el precio del recurso.
+Enum frecuencia_enum {
+  mensual       [note: 'ref / 12 x factor']
+  diario        [note: 'tarifa x dias del mes']
+  por_plantilla [note: 'plazas x tarifa diaria integrada x dias del mes']
+  por_evento    [note: 'monto repartido en los meses del evento (concepto.meses_aplicables)']
+  variable      [note: 'trimestral']
+  anual         [note: 'un solo mes']
+  bimestral
+  trimestral
+  semestral
+  estacional    [note: 'Solo ciertos meses, p.ej. CFE DIC-ABR vs MAY-NOV']
+}
+
+Table empresa {
+  id            int          [pk, increment]
+  clave         varchar(20)  [not null, unique]
+  razon_social  varchar(255) [not null]
+  rfc           varchar(13)
+  activo        boolean      [not null, default: true]
+  creado_en     timestamptz  [not null, default: `now()`]
+
+  Note: 'Persona moral que agrupa una o varias unidades de negocio.'
+}
+
+Table unidad_negocio {
+  id          int          [pk, increment]
+  empresa_id  int          [not null]
+  clave       varchar(20)  [not null, unique, note: 'GPE, MTY, ALLENDE, AJIJIC, NEZA, SATELITE, ESMERALDA, IRAPUATO, SENDERO, CEDIS']
+  nombre      varchar(150) [not null]
+  tipo        varchar(30)  [not null, note: 'casino | restaurante | cedis | corporativo']
+  plaza       varchar(100)
+  activo      boolean      [not null, default: true]
+
+  Note: '''
+  Sucursal o UDN. Determina que cedulas aplican: p.ej. "Regalias y Acc" y
+  "Att Clientes" no aplican a restaurantes.
+  '''
+}
+
+Table centro_costo {
+  id                 int          [pk, increment]
+  unidad_negocio_id  int          [not null]
+  clave              varchar(20)  [not null, note: 'AYB, OPER, ECD, COMENCHI, FINANZAS, STAFF, ADM']
+  nombre             varchar(150) [not null]
+  activo             boolean      [not null, default: true]
+
+  indexes {
+    (unidad_negocio_id, clave) [unique]
+  }
+
+  Note: 'AyB y Operaciones se presupuestan por separado aunque compartan cedula.'
+}
+
+Table usuario {
+  id              int          [pk, increment]
+  auth_user_id    varchar(64)  [unique, note: 'Enlace con auth_user.id de Better Auth. Nulo mientras la persona no active su cuenta']
+  departamento_id int          [note: 'Departamento de adscripcion. El acceso real se define en asignacion, no aqui']
+  nombre          varchar(150) [not null]
+  puesto          varchar(150)
+  email           varchar(180) [not null, unique, note: 'Se sincroniza desde auth_user.email; aqui se conserva para el directorio y las invitaciones']
+  es_superadmin   boolean      [not null, default: false, note: 'Unico rol que omite el filtro de departamento']
+  activo          boolean      [not null, default: true]
+  ultimo_acceso   timestamptz
+  creado_en       timestamptz  [not null, default: `now()`]
+
+  Note: '''
+  Perfil de negocio: quien es dentro del presupuesto (departamento, puesto,
+  responsable de categorias). NO guarda credenciales: de eso se encarga Better
+  Auth en auth_account. Que puede ver se resuelve siempre por sus asignaciones.
+  '''
+}
+
+Table departamento {
+  id       int          [pk, increment]
+  clave    varchar(40)  [not null, unique, note: 'MKT, TI, RH, MTTO, AYB, LEGAL, FINANZAS, COMPRAS, OPERACIONES, CONTROL_INTERNO']
+  nombre   varchar(150) [not null]
+  activo   boolean      [not null, default: true]
+
+  Note: '''
+  Area funcional dueno del gasto. NO es sinonimo de cedula: una cedula puede
+  repartirse entre varios departamentos (Limpieza y Mtto tiene categorias de
+  MTTO y de TI) y un departamento puede abarcar varias cedulas (TI aparece en
+  Licenciamiento, Limpieza y Mtto, y Activos).
+  '''
+}
+
+Table ejercicio {
+  id                int         [pk, increment]
+  anio              int         [not null, unique]
+  anio_referencia   int         [not null, note: 'Anio real usado como base de calculo (ej. 2025 para el PTTO 2026)']
+  abierto           boolean     [not null, default: true]
+  fecha_apertura    date
+  fecha_cierre      date        [note: 'La UI muestra la cuenta regresiva: "Cierre 28 nov - 6d 04h"']
+  cerrado_en        timestamptz [note: 'Al cerrar, los valores de recurso_valor quedan fijos']
+  cerrado_por       int
+
+  Note: '''
+  Ciclo presupuestal. Abrir el anio siguiente copia los valores de los recursos
+  marcados como proyeccion hasta que se confirmen.
+  '''
+}
+
+Table calendario_mes {
+  id             int      [pk, increment]
+  ejercicio_id   int      [not null]
+  mes            mes_enum [not null]
+  numero_mes     smallint [not null, note: '1..12']
+  dias           smallint [not null, note: 'Renglon "dias" de las cedulas: 31, 28/29, 31, 30...']
+  dias_festivos  smallint [not null, default: 0, note: 'Usado en el calculo de nomina']
+  dias_pago      smallint [note: 'Dias de compra/pago usados en la cedula de cigarros']
+
+  indexes {
+    (ejercicio_id, mes) [unique]
+  }
+}
+
+// NOTA: los supuestos transversales (TC 20.00, inflacion 5%, benchmark MP 2%
+// del ingreso de operacion) viven en la tabla "variable" de la seccion 17,
+// que generaliza lo que antes era parametro_global.
+
+// =============================================================================
+// 2. ESTRUCTURA DE CEDULAS (las hojas del libro)
+// =============================================================================
+
+Table cedula {
+  id           int          [pk, increment]
+  departamento_id int       [note: 'Departamento por omision de sus categorias; puede sobreescribirse por categoria']
+  clave        varchar(40)  [not null, unique, note: 'INGRESOS, RENTA_SERVICIOS, LIMPIEZA_MTTO, LICENCIAMIENTO, REGALIAS_ACC, RH_GENTE, RH_NOMINA, ADM_VIATICOS, GTOS_FIN, LEGAL, MKT, ATT_CLIENTES, MP_AYB, ACTIVOS_DEP, IMPUESTOS']
+  nombre       varchar(150) [not null]
+  naturaleza   naturaleza_enum [not null]
+  orden        smallint     [not null]
+  aplica_casino      boolean [not null, default: true]
+  aplica_restaurante boolean [not null, default: true]
+
+  Note: 'Cada hoja del libro de presupuesto.'
+}
+
+Table cedula_nota {
+  id         int         [pk, increment]
+  cedula_id  int         [not null]
+  tipo       varchar(20) [not null, note: 'consideracion | criterio_calculo | nota_final']
+  orden      smallint    [not null]
+  texto      text        [not null]
+
+  Note: 'Bloques "Consideraciones:" y "Para Calculo:" del encabezado de cada hoja.'
+}
+
+Table categoria {
+  id                   int          [pk, increment]
+  cedula_id            int          [not null]
+  categoria_padre_id   int          [note: 'Permite subtotales anidados (ej. LIMPIEZA y MTTO > POLIZAS MTTO)']
+  departamento_id      int          [note: 'Dueno real de la familia de gasto. Si es nulo, hereda el de la cedula']
+  usuario_responsable_id int        [note: 'Responsable nominal de presupuestar y controlar la familia de gasto']
+  clave                varchar(60)  [not null]
+  nombre               varchar(180) [not null]
+  orden                smallint     [not null]
+  es_totalizadora      boolean      [not null, default: false]
+
+  indexes {
+    (cedula_id, clave) [unique]
+  }
+
+  Note: '''
+  Agrupador de renglones dentro de una cedula (RENTA (Adm), SERVICIOS BASICOS,
+  POLIZAS MTTO, PREVISION SOCIAL, PROMOCIONES, PUBLICIDAD, etc.).
+  El control presupuestal se ejerce por el total de la familia de gasto.
+  '''
+}
+
+Table concepto {
+  id                int             [pk, increment]
+  categoria_id      int             [not null]
+  clave             varchar(80)     [not null]
+  nombre            varchar(255)    [not null, note: 'Texto del renglon: CFE (PROPORCIONAL), GAS (100% AYB), UNIFORMES CASINO...']
+  naturaleza        naturaleza_enum [not null]
+  frecuencia        frecuencia_enum [not null, default: 'mensual']
+  meses_aplicables  smallint[]      [note: 'Para frecuencia estacional o por evento: [12,1,2,3,4] = DIC-ABR']
+  cuenta_contable   varchar(30)
+  solo_ayb          boolean         [not null, default: false, note: 'Renglones marcados AYB']
+  exclusivo_cc      varchar(20)     [note: 'Ej. "Horas de Soporte" solo aplica a CC ECD y OPER']
+  editable          boolean         [not null, default: true, note: 'false = celda calculada/ligada a otra cedula (no amarilla)']
+  orden             smallint        [not null]
+  activo            boolean         [not null, default: true]
+
+  indexes {
+    (categoria_id, clave) [unique]
+  }
+
+  Note: 'Catalogo maestro de renglones presupuestables. Se reutiliza en todas las UDN.'
+}
+
+// =============================================================================
+// 2b. RECURSOS DE NEGOCIO (catalogo de precios, parametros y tabuladores)
+// =============================================================================
+//
+// Un renglon del presupuesto no guarda montos: guarda DE QUE RECURSO SALE y CON
+// QUE CANTIDAD. Los 12 meses se derivan.
+//
+//     Cigarros - Mar 2026 = 500 pzas/dia x 31 dias x $72.50 = $1,123,750
+//                           |                |        |
+//                           |                |        recurso_valor  (por anio)
+//                           |                calendario_mes.dias
+//                           recurso_cantidad (por casino)
+//
+// Regla de oro del diseno: el PRECIO es del recurso y aplica a los 7 casinos;
+// la CANTIDAD es de cada casino. Por eso viven en tablas distintas.
+// =============================================================================
+
+Enum tipo_recurso_enum {
+  parametro   [note: 'Un valor por anio: salario minimo, costo social 3%, factor SDI']
+  insumo      [note: 'Precio por anio + consumo por casino: cajetilla, refresco, botana, cafe']
+  tabulador   [note: 'Tabla con varias columnas por renglon: puestos con salario, bono, categoria']
+  tarifa      [note: 'Costo unitario de un evento o servicio: examen por ingreso, uniforme por puesto']
+}
+
+Table cuenta_contable {
+  id       int          [pk, increment]
+  clave    varchar(20)  [not null, unique, note: '6010-001, 6020-003, 6310-004']
+  nombre   varchar(180) [not null]
+  activa   boolean      [not null, default: true]
+
+  Note: 'Catalogo contable. Solo el superadmin la asigna a un recurso o renglon.'
+}
+
+Table recurso {
+  id                 int               [pk, increment]
+  departamento_id    int               [not null, note: 'Quien fija su precio. El consumo lo fija cada casino']
+  cuenta_contable_id int
+  tipo               tipo_recurso_enum [not null]
+  clave              varchar(60)       [not null, unique]
+  nombre             varchar(180)      [not null, note: 'Cajetilla de cigarros, Refresco 600 ml, Despensa diaria, Tabulador de puestos']
+  unidad             varchar(20)       [note: 'pieza, bolsa, vaso, dia, plaza, juego, ingreso']
+  descripcion        varchar(255)
+  activo             boolean           [not null, default: true]
+  creado_en          timestamptz       [not null, default: `now()`]
+
+  Note: '''
+  Catalogo unico de recursos. Agregar un insumo nuevo (Botana, Agua, Cerveza)
+  es un INSERT aqui, no una tabla nueva. Sustituye a las cedulas de supuestos
+  de cigarros, refresco y nomina que existian antes.
+  '''
+}
+
+Table recurso_valor {
+  id            int           [pk, increment]
+  recurso_id    int           [not null]
+  anio          int           [not null]
+  componente    varchar(60)   [not null, default: 'valor', note: 'Para tabuladores: el puesto o la columna (sueldo, bono). Para lo demas: valor']
+  valor         numeric(18,6) [not null]
+  es_proyeccion boolean       [not null, default: false, note: 'Se copio del anio anterior y aun no se confirma. La UI lo dibuja punteado']
+  confirmado_en timestamptz
+  confirmado_por int
+
+  indexes {
+    (recurso_id, anio, componente) [unique]
+  }
+
+  Note: '''
+  El valor de un recurso por anio, con historia (precio 24, 25, 26) y con el
+  anio siguiente en proyeccion. Al cerrar el ciclo los valores quedan fijos;
+  al abrir el anio nuevo se copian marcados como proyeccion.
+  '''
+}
+
+Enum origen_cantidad_enum {
+  fija          [note: 'La teclea el casino: 500 pzas/dia. Es lo que muestra la pantalla de recursos']
+  derivada_dau  [note: 'Se proyecta desde la afluencia del mes: DAU x factores de recurso_factor']
+}
+
+Table recurso_cantidad {
+  id                int           [pk, increment]
+  recurso_id        int           [not null]
+  unidad_negocio_id int           [not null]
+  ejercicio_id      int           [not null]
+  origen_cantidad   origen_cantidad_enum [not null, default: 'fija']
+  cantidad          numeric(18,6) [note: 'Consumo/dia del casino, plazas, comidas/dia, ingresos/mes. Nulo si se deriva del DAU']
+  base              varchar(20)   [not null, default: 'dia', note: 'dia | mes | anio | evento: sobre que periodo esta expresada']
+
+  indexes {
+    (recurso_id, unidad_negocio_id, ejercicio_id) [unique]
+  }
+
+  Note: '''
+  Cambiar esto afecta solo a ese casino; cambiar recurso_valor afecta a todos.
+  Con origen derivada_dau la cantidad no se captura: sale de demanda_mes por los
+  factores del recurso, y el campo cantidad queda como cache del resultado.
+  '''
+}
+
+// -----------------------------------------------------------------------------
+// Proyeccion por afluencia (DAU)
+// -----------------------------------------------------------------------------
+// El Excel no parte de un consumo/dia fijo para cigarros y refresco: proyecta la
+// demanda desde la afluencia de clientes. Estas dos tablas sostienen ese calculo
+// sin volver a crear una tabla por insumo.
+//
+//   CIGARROS
+//     cajetillas_mes = dau x pct_conversion_dau
+//     pedidos_mes    = dias_del_mes / dias_por_pedido        (calendario_mes.dias_pago)
+//     monto          = cajetillas_mes x recurso_valor.valor
+//
+//   REFRESCO (bag in box)
+//     atencion_clientes = dau x pct_uso_dau
+//     demanda_unidades  = atencion_clientes x unidades_por_cliente   (1.5 vasos)
+//     rendimiento       = rendimiento_ml / factor_ml_onza / onzas_por_unidad
+//     bib_requeridos    = demanda_unidades / rendimiento / eficiencia
+//     monto             = bib_requeridos x recurso_valor.valor
+// -----------------------------------------------------------------------------
+
+Table demanda_mes {
+  id                int           [pk, increment]
+  unidad_negocio_id int           [not null]
+  ejercicio_id      int           [not null]
+  mes               mes_enum      [not null]
+  dau               numeric(14,4) [not null, note: 'Afluencia acumulada del mes (Daily Active Users)']
+  atencion_clientes numeric(14,4) [note: 'Proyeccion de clientes atendidos; deriva del DAU por un factor de uso']
+  es_estimado       boolean       [not null, default: false, note: 'Meses cerrados con dato real vs meses proyectados']
+
+  indexes {
+    (unidad_negocio_id, ejercicio_id, mes) [unique]
+  }
+
+  Note: 'Driver de demanda por casino. Alimenta a todo recurso con origen derivada_dau.'
+}
+
+Table recurso_factor {
+  id                int           [pk, increment]
+  recurso_id        int           [not null]
+  unidad_negocio_id int           [note: 'Nulo = el factor aplica a todos los casinos']
+  ejercicio_id      int           [not null]
+  clave             varchar(60)   [not null, note: 'pct_conversion_dau, pct_uso_dau, unidades_por_cliente, rendimiento_ml, factor_ml_onza, onzas_por_unidad, eficiencia, dias_por_pedido']
+  valor             numeric(18,6) [not null]
+  unidad            varchar(20)   [note: 'porcentaje | ml | onzas | unidades | dias']
+  fuente            varchar(120)  [note: 'De donde sale: historico del anio anterior, ficha tecnica del proveedor, politica interna']
+
+  indexes {
+    (recurso_id, unidad_negocio_id, ejercicio_id, clave) [unique]
+  }
+
+  Note: '''
+  Factores de calculo de un recurso. Reemplaza las columnas sueltas que tenian
+  mp_cigarro_supuesto y mp_refresco_supuesto, sin atarlas a un insumo concreto:
+  cualquier recurso nuevo puede declarar los suyos.
+  El pct_conversion_dau sale de historico_insumo del anio de referencia
+  (cajetillas vendidas / DAU).
+  '''
+}
+
+Table recurso_recalculo {
+  id             bigint      [pk, increment]
+  recurso_id     int         [not null]
+  ejercicio_id   int         [not null]
+  disparado_por  int
+  motivo         varchar(60) [not null, note: 'cambio_precio | cambio_cantidad | apertura_ciclo']
+  partidas_afectadas int     [not null, default: 0]
+  notificados    int         [not null, default: 0, note: 'Encargados avisados del recalculo']
+  ejecutado_en   timestamptz [not null, default: `now()`]
+
+  Note: 'Cambiar un precio recalcula todos los presupuestos que consumen ese recurso y avisa a sus encargados.'
+}
+
+// =============================================================================
+// 3. NUCLEO PRESUPUESTAL
+// =============================================================================
+
+Table presupuesto {
+  id                 int                     [pk, increment]
+  ejercicio_id       int                     [not null]
+  unidad_negocio_id  int                     [not null]
+  centro_costo_id    int                     [not null]
+  escenario          escenario_enum          [not null, default: 'base']
+  version            smallint                [not null, default: 1]
+  estado             estado_presupuesto_enum [not null, default: 'borrador']
+  es_vigente         boolean                 [not null, default: true]
+  autorizado_por     int
+  autorizado_en      timestamptz
+  creado_en          timestamptz             [not null, default: `now()`]
+  actualizado_en     timestamptz             [not null, default: `now()`]
+
+  indexes {
+    (ejercicio_id, unidad_negocio_id, centro_costo_id, escenario, version) [unique, name: 'ux_presupuesto_version']
+    (ejercicio_id, es_vigente)
+  }
+
+  Note: 'Cabecera. Un libro de Excel equivale a N presupuestos (uno por CC y escenario).'
+}
+
+Enum origen_partida_enum {
+  recurso     [note: 'Badge U: cantidad x precio del recurso x periodo']
+  formula     [note: 'Badge f: derivado de un tabulador o de otro renglon']
+  parametro   [note: 'Badge %: porcentaje aplicado sobre otro renglon']
+  manual      [note: 'Badge M: monto tecleado, sin recurso detras']
+}
+
+Table presupuesto_partida {
+  id                  int           [pk, increment]
+  presupuesto_id      int           [not null]
+  concepto_id         int           [not null]
+  departamento_id     int           [not null, note: 'Denormalizado desde concepto > categoria por trigger. Es la columna sobre la que filtra la politica de acceso']
+  cuenta_contable_id  int
+  origen              origen_partida_enum [not null, default: 'recurso']
+  recurso_id          int           [note: 'De que recurso sale el renglon. Nulo solo si origen = manual']
+  componente          varchar(60)   [note: 'Parte del recurso que consume: "8 puestos", "columna bono"']
+  cantidad            numeric(18,6) [note: '104 plazas, 500 pzas/dia, 104 x 2 juegos, 10 ingresos/mes']
+  unidad_cantidad     varchar(30)   [note: 'plazas, pzas/dia, comidas/dia, ingresos/mes']
+  memoria_calculo     varchar(255)  [note: 'Texto que la UI muestra bajo el renglon: "104 plazas x $34.71 x dias del mes"']
+  frecuencia          frecuencia_enum [note: 'Override de la frecuencia del concepto para esta UDN']
+  monto_referencia    numeric(18,4) [note: 'Columna "$ REF 2025" del comparativo contra el anio anterior']
+  factor              numeric(9,6)  [note: 'Columna "Factor": 0.03, 0.05, 0.10...']
+  factor_texto        varchar(40)   [note: 'Cuando el factor no es numerico: "cotizacion", "-"']
+  total_anual         numeric(18,4) [not null, default: 0, note: 'Cache del SUM(partida_mes.monto); recalculado por trigger']
+  creado_en           timestamptz   [not null, default: `now()`]
+  actualizado_en      timestamptz   [not null, default: `now()`]
+
+  indexes {
+    (presupuesto_id, concepto_id) [unique]
+    (recurso_id)
+  }
+
+  Note: '''
+  Un renglon de la hoja. NO guarda montos: guarda de que recurso sale y con que
+  cantidad. Para cambiar un monto se cambia la cantidad o el recurso.
+  '''
+}
+
+Table partida_mes {
+  id               int           [pk, increment]
+  partida_id       int           [not null]
+  mes              mes_enum      [not null]
+  monto            numeric(18,4) [not null, default: 0, note: 'Valor efectivo: el override si existe, si no el calculado']
+  monto_calculado  numeric(18,4) [note: 'Lo que arroja la formula. Se conserva aunque haya override, para poder mostrar la diferencia']
+  es_override      boolean       [not null, default: false, note: 'Badge Override: alguien piso el calculo a mano']
+  motivo_override  varchar(255)  [note: 'Obligatorio cuando es_override = true']
+  calculado_en     timestamptz
+
+  indexes {
+    (partida_id, mes) [unique]
+    (mes)
+  }
+
+  Note: '''
+  Tabla de hechos: 12 filas por partida. Casi siempre se escribe sola, a partir
+  del recurso y la cantidad; el override es la excepcion y queda marcado.
+  '''
+}
+
+Table partida_enlace {
+  id                  int         [pk, increment]
+  partida_destino_id  int         [not null]
+  partida_origen_id   int         [not null]
+  proporcion          numeric(9,6) [not null, default: 1, note: 'Prorrateo cuando el gasto se reparte entre UDN o CC']
+  descripcion         varchar(255)
+
+  indexes {
+    (partida_destino_id, partida_origen_id) [unique]
+  }
+
+  Note: '''
+  Reemplaza los vinculos entre hojas del Excel: p.ej. SUBSIDIO A EMPLEADOS en
+  Ingresos AyB esta ligado al renglon de RH - Gente, y CORTESIAS CASINO se
+  alimenta desde Atencion a Clientes.
+  '''
+}
+
+// =============================================================================
+// 4. CEDULA DE INGRESOS
+// =============================================================================
+
+Enum linea_negocio_enum {
+  maquinas
+  mesas
+  sportsbook
+  ayb_terceros
+  foliatti_club
+  cortesias_casino
+  eventos
+  otros
+}
+
+Table ingreso_mes {
+  id                 int                [pk, increment]
+  presupuesto_id     int                [not null]
+  linea_negocio      linea_negocio_enum [not null]
+  mes                mes_enum           [not null]
+  monto              numeric(18,4)      [not null, default: 0]
+  pct_vs_ingreso_juego numeric(9,6)     [note: 'Coherencia vs ingreso de juego de casa/sala']
+
+  indexes {
+    (presupuesto_id, linea_negocio, mes) [unique]
+  }
+
+  Note: 'Detalle de ingresos por linea. Minimo de crecimiento del 10% vs real del anio anterior.'
+}
+
+// =============================================================================
+// 5. CEDULA RH - NOMINA
+// =============================================================================
+
+// nomina_supuesto se elimino: sus factores ahora son recursos.
+//
+//   Salario minimo diario, factor SDI, despensa diaria, dias de vacaciones,
+//   dias de aguinaldo, costo social 3%, impuesto sobre nomina 3%
+//        -> recurso tipo "parametro", con recurso_valor por anio y su fuente
+//           (CONASAMI, LFT, IMSS, Estado de N.L., politica interna)
+//
+//   Tabulador de puestos (puesto x relacion laboral x categoria, con salario,
+//   bono y plazas autorizadas)
+//        -> recurso tipo "tabulador"; cada puesto es un recurso_valor.componente
+//           y las plazas por casino van en recurso_cantidad
+//
+// La base diaria integrada (SDI, premios, primas, despensa, festivos,
+// aguinaldo, costo social) es derivada, no capturada:
+//   SDI            = salario x factor_integracion
+//   premio         = (salario x 7 / 10) / 7
+//   prima dominical= (salario / 4) / 7
+//   prima vacacional = salario x dias_vacaciones / 365
+//   aguinaldo      = salario x dias_aguinaldo / 365
+//   costo social   = diario total integrado x pct_costo_social
+
+Table nomina_prestacion {
+  id              int           [pk, increment]
+  presupuesto_id  int           [not null]
+  nombre          varchar(120)  [not null, note: 'GASOLINA, PRESTACION 2, PRODUCTIVIDAD, FINIQUITOS...']
+  beneficiarios   int           [not null, default: 0]
+  monto_unitario  numeric(14,4) [not null, default: 0]
+  incluida_en_nomina boolean    [not null, default: false]
+
+  Note: 'Factores mensuales de nomina calculados por # beneficiarios x monto.'
+}
+
+// =============================================================================
+// 6. CEDULA RH - GENTE Y CULTURA
+// =============================================================================
+
+Table evento_integracion {
+  id              int           [pk, increment]
+  presupuesto_id  int           [not null]
+  concepto_id     int           [note: 'Renglon padre: EVENTOS DE INTEGRACION']
+  nombre          varchar(180)  [not null, note: 'Rosca de reyes, Dia de la Madre, Posada, Kit de bienvenida...']
+  mes             mes_enum      [not null]
+  pax             int           [note: '# Pax']
+  ptto_por_pax    numeric(14,4) [note: 'Presupuesto unitario']
+  ptto_unico      numeric(14,4) [note: 'Alternativa al calculo por pax']
+  factor          numeric(9,6)  [default: 0.05]
+
+  Note: 'Recuadro de factores de eventos de integracion (pax x costo unitario, o monto unico).'
+}
+
+// =============================================================================
+// 7. CEDULA ADMINISTRACION Y VIATICOS
+// =============================================================================
+
+Table viaje_presupuestado {
+  id              int           [pk, increment]
+  presupuesto_id  int           [not null]
+  destino         varchar(120)  [not null, note: 'MTY, Mexico, Ajijic, Irapuato, diversos']
+  mes             mes_enum      [not null]
+  pax             int           [not null, default: 0]
+  costo_unitario  numeric(14,4) [not null, note: 'Avion + 2 noches de hospedaje + 3 dias de viaticos']
+  factor          numeric(9,6)  [default: 0.05]
+
+  indexes {
+    (presupuesto_id, destino, mes)
+  }
+}
+
+// =============================================================================
+// 8. CEDULA LICENCIAMIENTO
+// =============================================================================
+
+Enum tipo_licencia_enum {
+  externa  [note: 'Pago fijo por contrato de software con proveedor tercero']
+  interna  [note: 'Cuota intercompania: sistema de caja ECD, Comenchi']
+}
+
+Table licencia {
+  id            int                [pk, increment]
+  clave         varchar(60)        [not null, unique]
+  nombre        varchar(150)       [not null, note: 'OFFICE 365, SOPHOS, AZURE, GITHUB, LOCKONE...']
+  proveedor     varchar(150)
+  ambito        varchar(80)        [note: 'Columna de agrupacion: FOLIATTI ONLINE, Ciberseguridad, General, ECD, TI, Arquitectos, TyC']
+  tipo          tipo_licencia_enum [not null]
+  moneda        char(3)            [not null, default: 'MXN']
+  costo_unitario_diario numeric(14,6) [note: 'Sistema de caja ECD: precio diario por maquina']
+  activo        boolean            [not null, default: true]
+
+  Note: 'Catalogo de licencias. Los costos variables ligados al ingreso no se consideran licencia.'
+}
+
+Table licencia_partida {
+  id              int           [pk, increment]
+  presupuesto_id  int           [not null]
+  licencia_id     int           [not null]
+  unidades        int           [note: 'Maquinas en sala, usuarios o equipos licenciados']
+  costo_referencia numeric(18,4)
+  factor          numeric(9,6)  [default: 0.05]
+  tipo_cambio     numeric(10,4) [note: 'Aplica a licencias en USD']
+
+  indexes {
+    (presupuesto_id, licencia_id) [unique]
+  }
+}
+
+// =============================================================================
+// 9. CEDULA REGALIAS Y ACCESORIOS
+// =============================================================================
+
+Enum tenencia_maquina_enum {
+  propia_cdm       [note: 'Maquinas propias CDM']
+  propia_fmx_oper  [note: 'Maquinas propias FMX / Operadora']
+  rentada_proveedor [note: 'Maquinas rentadas al proveedor']
+}
+
+Table regalia_maquina {
+  id                    int                   [pk, increment]
+  presupuesto_id        int                   [not null]
+  tenencia              tenencia_maquina_enum [not null]
+  num_maquinas          int                   [not null, default: 0]
+  ingreso_diario_por_maquina numeric(14,4)    [note: 'Ingreso diario promedio por maquina']
+  pct_netwin_promedio   numeric(9,6)          [note: '% NW generado promedio']
+  pct_costo_regalias    numeric(9,6)          [note: '% costo de regalias promedio sobre NW']
+
+  indexes {
+    (presupuesto_id, tenencia) [unique]
+  }
+}
+
+Table regalia_mesa {
+  id              int           [pk, increment]
+  presupuesto_id  int           [not null, unique]
+  num_mesas       int           [not null, default: 0]
+  cuota_fija_mensual numeric(14,4) [not null, default: 0]
+}
+
+// =============================================================================
+// 10. CEDULA MP AYB - INSUMOS
+// =============================================================================
+//
+// Cigarros y refresco YA NO tienen tablas propias: son dos filas del catalogo
+// "recurso" (seccion 2b), igual que Botana, Agua, Cafe o Cerveza. Se presupuestan
+// como cualquier otro insumo:
+//
+//     costo del mes = recurso_cantidad.cantidad (consumo/dia del casino)
+//                   x calendario_mes.dias
+//                   x recurso_valor.valor (precio del anio)
+//
+// -----------------------------------------------------------------------------
+// COMO LO CALCULA EL EXCEL  (SI se conserva: ver demanda_mes y recurso_factor)
+// -----------------------------------------------------------------------------
+// La proyeccion por afluencia se mantiene. Un recurso marcado como
+// origen_cantidad = derivada_dau no usa consumo/dia fijo: proyecta la demanda
+// desde demanda_mes con los factores declarados en recurso_factor.
+// Esta es la memoria de calculo completa.
+//
+// CIGARROS
+//   precio_ejercicio        = costo_unitario_actual x (1 + pct_incremento)
+//                             ej. 72.24 x 1.181 = 85.31544
+//   cajetillas_proyectadas  = DAU_mensual x pct_conversion
+//                             pct_conversion = cajetillas_vendidas / DAU  (anio ref)
+//   cajetillas_por_pedido   = cajetillas_proyectadas / num_pedidos_del_mes
+//   num_pedidos_del_mes     = dias_del_mes / dias_que_abarca_pedido (14)
+//   monto_total             = cajetillas_proyectadas x precio_ejercicio
+//   monto_cortesias_fc      = monto_total x pct_cortesias_fc
+//   Insumos requeridos: DAU mensual por casino, % conversion del anio anterior,
+//   dias de pago por mes.
+//
+// REFRESCO (bag in box)
+//   precio_ejercicio      = costo_unitario_bib x (1 + pct_incremento)
+//                           ej. 1387.93 x 1.087 = 1508.67991
+//   rendimiento_onzas     = rendimiento_ml (113562) / factor_ml_onza (29.58)
+//   vasos_por_bib         = rendimiento_onzas / onzas_por_vaso (8)
+//   demanda_vasos         = proyeccion_atencion_clientes x vasos_por_cliente (1.5)
+//   bib_requeridos        = demanda_vasos / vasos_por_bib
+//                           (el Excel ademas divide por eficiencia_bib = 481.74)
+//   monto                 = bib_requeridos x precio_ejercicio
+//   proyeccion_atencion_clientes = DAU_mensual x pct_uso (2.5248)
+//
+// INSUMOS DE ALIMENTOS  -> si se conserva en mp_insumo_bloque, mas abajo.
+//   Se aisla el efecto de cigarro y refresco y se aplica el % de MP optimo
+//   sobre cada bloque de ingreso (venta terceros 0.67, cortesias 0.50,
+//   promos y empleados 1.00).
+// =============================================================================
+
+Enum bloque_insumo_enum {
+  venta_terceros
+  promos_agresivas
+  cortesias_alimentos
+  cortesias_empleados
+}
+
+Table mp_insumo_bloque {
+  id              int                [pk, increment]
+  presupuesto_id  int                [not null]
+  bloque          bloque_insumo_enum [not null]
+  pct_mp_optimo   numeric(9,6)       [not null, note: '0.67 venta terceros, 0.50 cortesias, 1.00 promos y empleados']
+
+  indexes {
+    (presupuesto_id, bloque) [unique]
+  }
+
+  Note: 'El presupuesto de insumos aisla el efecto de cigarro y refresco, que van por separado.'
+}
+
+Table mp_insumo_bloque_mes {
+  id                 int           [pk, increment]
+  bloque_id          int           [not null]
+  mes                mes_enum      [not null]
+  ingreso_base       numeric(18,4) [not null, default: 0]
+  deduccion_cigarro  numeric(18,4) [not null, default: 0]
+  deduccion_bebidas  numeric(18,4) [not null, default: 0]
+  deduccion_promos   numeric(18,4) [not null, default: 0]
+  monto_presupuesto  numeric(18,4) [not null, default: 0]
+
+  indexes {
+    (bloque_id, mes) [unique]
+  }
+}
+
+Table mp_resumen_mes {
+  id                 int           [pk, increment]
+  presupuesto_id     int           [not null]
+  mes                mes_enum      [not null]
+  venta_ayb          numeric(18,4) [not null, default: 0]
+  mp_cigarros        numeric(18,4) [not null, default: 0]
+  mp_refresco        numeric(18,4) [not null, default: 0]
+  mp_insumos         numeric(18,4) [not null, default: 0]
+  mp_total           numeric(18,4) [not null, default: 0]
+  pct_mp_vs_venta    numeric(9,6)
+  pct_mp_vs_ingreso_operacion numeric(9,6) [note: 'Se compara contra el benchmark objetivo (2%)']
+
+  indexes {
+    (presupuesto_id, mes) [unique]
+  }
+}
+
+// =============================================================================
+// 11. HISTORICOS DE REFERENCIA (hojas de tablas y bloques "Referencia Historica")
+// =============================================================================
+
+Table historico_mensual_udn {
+  id                    int           [pk, increment]
+  unidad_negocio_id     int           [not null]
+  anio                  int           [not null]
+  mes                   mes_enum      [not null]
+  es_estimado           boolean       [not null, default: false, note: 'Meses marcados con E (Oct E, Nov E, Dic E)']
+  ingreso_operacion     numeric(18,4)
+  ingreso_ayb           numeric(18,4)
+  venta_terceros_ayb    numeric(18,4)
+  mp_total              numeric(18,4)
+
+  indexes {
+    (unidad_negocio_id, anio, mes) [unique]
+  }
+}
+
+Enum insumo_historico_enum {
+  cajetillas_vendidas
+  compra_cigarro
+  compra_bag_in_box
+}
+
+Table historico_insumo {
+  id                 int                   [pk, increment]
+  unidad_negocio_id  int                   [not null]
+  tipo               insumo_historico_enum [not null]
+  anio               int                   [not null]
+  mes                mes_enum              [not null]
+  cantidad           numeric(18,4)         [note: 'Piezas / cajetillas / bag in box']
+  importe            numeric(18,4)         [note: 'Importe en pesos']
+
+  indexes {
+    (unidad_negocio_id, tipo, anio, mes) [unique]
+  }
+
+  Note: 'Consolida las tablas de venta de cajetillas por sucursal y compras de cigarro y BIB.'
+}
+
+// =============================================================================
+// 12. CEDULA GASTOS FINANCIEROS - COMISIONES TPV
+// =============================================================================
+
+Enum tipo_tarjeta_enum {
+  debito
+  credito
+  promedio
+}
+
+Table proveedor_tpv {
+  id      int          [pk, increment]
+  clave   varchar(30)  [not null, unique, note: 'KLU, VELPAY, CLIP, PAYCIPS, BANREGIO']
+  nombre  varchar(120) [not null]
+  activo  boolean      [not null, default: true]
+}
+
+Table tasa_tpv {
+  id               int               [pk, increment]
+  proveedor_tpv_id int               [not null]
+  ejercicio_id     int               [not null]
+  tipo_tarjeta     tipo_tarjeta_enum [not null]
+  tasa_sin_iva     numeric(9,6)      [not null, note: 'Comision negociada sin IVA, ej. 0.0245']
+
+  indexes {
+    (proveedor_tpv_id, ejercicio_id, tipo_tarjeta) [unique]
+  }
+}
+
+Table comision_tpv_partida {
+  id                    int          [pk, increment]
+  presupuesto_id        int          [not null]
+  proveedor_tpv_id      int          [not null]
+  pct_ventas_en_tpv     numeric(9,6) [not null, note: '% de las ventas que se cobran por TPV']
+  tasa_aplicada_sin_iva numeric(9,6) [not null]
+  pct_trasladado_cliente numeric(9,6) [default: 0, note: 'Comision que se cobra al cliente (3% con IVA = 2.6% neto)']
+  pct_runners           numeric(9,6) [default: 0.20, note: 'Estimado de transacciones TPV hechas con Runners']
+
+  indexes {
+    (presupuesto_id, proveedor_tpv_id) [unique]
+  }
+}
+
+// =============================================================================
+// 13. CEDULA ACTIVOS Y DEPRECIACIONES
+// =============================================================================
+
+Table activo_fijo {
+  id                int           [pk, increment]
+  presupuesto_id    int           [not null]
+  categoria_id      int           [note: 'ACTIVO INFRAESTRUCTURA / ACTIVO EQ COMPUTO-ELECTRONICO']
+  descripcion       varchar(200)  [not null, note: 'TV, Climas, Camaras y NVR, Cocina, Servidores, Proyecto NVIO...']
+  mes_adquisicion   mes_enum      [not null]
+  cantidad          int           [not null, default: 1]
+  costo_unitario    numeric(18,4) [not null, default: 0]
+  vida_util_meses   smallint      [note: 'Base del calculo de depreciacion']
+  sujeto_disponibilidad boolean   [not null, default: true, note: 'El PTTO de activos depende de disponibilidad de recursos']
+
+  Note: 'Compra de activo fijo. Accesorios y componentes van al presupuesto de mantenimiento.'
+}
+
+Table depreciacion_mes {
+  id              int           [pk, increment]
+  presupuesto_id  int           [not null]
+  activo_fijo_id  int           [note: 'Nulo cuando es depreciacion de activos preexistentes o proyectos']
+  mes             mes_enum      [not null]
+  monto           numeric(18,4) [not null, default: 0]
+
+  indexes {
+    (presupuesto_id, mes)
+  }
+}
+
+// =============================================================================
+// 14. CEDULA DE IMPUESTOS
+// =============================================================================
+
+Enum linea_fiscal_enum {
+  maquinas
+  sportsbook
+  mesas
+  ayb
+}
+
+Table base_fiscal_mes {
+  id              int               [pk, increment]
+  presupuesto_id  int               [not null]
+  linea_fiscal    linea_fiscal_enum [not null]
+  mes             mes_enum          [not null]
+  netwin          numeric(18,4)     [not null, default: 0]
+  netwin_byw      numeric(18,4)     [not null, default: 0, note: 'Netwin Black and White (declarado)']
+  ventas          numeric(18,4)     [not null, default: 0]
+  devoluciones    numeric(18,4)     [not null, default: 0]
+  premios         numeric(18,4)     [not null, default: 0]
+  premios_especie numeric(18,4)     [not null, default: 0]
+  ingreso_fiscal  numeric(18,4)     [note: 'Aplica a la linea AyB']
+
+  indexes {
+    (presupuesto_id, linea_fiscal, mes) [unique]
+  }
+
+  Note: 'Bases de calculo por linea de juego. Factores tipicos: ventas 2.6, dev 1.1, premios 0.6.'
+}
+
+Table tipo_impuesto {
+  id           int          [pk, increment]
+  clave        varchar(40)  [not null, unique, note: 'ISR, SEGOB, IEPS, PREMIOS_FED_1, RET_EROG_EST_10, REALIZACION_JUEGOS_6, DERECHO_MAQUINAS, IVA']
+  nombre       varchar(150) [not null]
+  ambito       varchar(20)  [not null, note: 'federal | estatal | municipal']
+  base_calculo varchar(60)  [not null, note: 'netwin | netwin_byw | premios | ingreso_fiscal | cuota_fija']
+  tasa         numeric(9,6) [note: 'Nulo cuando es cuota fija o tabla progresiva']
+
+  Note: 'Catalogo de contribuciones sobre juego y sobre ingreso.'
+}
+
+Table impuesto_mes {
+  id               int           [pk, increment]
+  presupuesto_id   int           [not null]
+  tipo_impuesto_id int           [not null]
+  linea_fiscal     linea_fiscal_enum [not null]
+  mes              mes_enum      [not null]
+  base             numeric(18,4) [not null, default: 0]
+  monto            numeric(18,4) [not null, default: 0]
+
+  indexes {
+    (presupuesto_id, tipo_impuesto_id, linea_fiscal, mes) [unique]
+  }
+}
+
+Table participacion_mes {
+  id              int           [pk, increment]
+  presupuesto_id  int           [not null]
+  mes             mes_enum      [not null]
+  netwin          numeric(18,4) [not null, default: 0]
+  netwin_byw      numeric(18,4) [not null, default: 0]
+  impuestos       numeric(18,4) [not null, default: 0]
+  netwin_bruto    numeric(18,4) [not null, default: 0]
+  pct_participacion numeric(9,6)
+  monto_participacion numeric(18,4) [not null, default: 0]
+
+  indexes {
+    (presupuesto_id, mes) [unique]
+  }
+
+  Note: 'Participacion al socio/arrendador calculada sobre el netwin bruto despues de impuestos.'
+}
+
+// =============================================================================
+// 15. CONTROL Y SEGUIMIENTO
+// =============================================================================
+
+Table ejercido_mes {
+  id              int           [pk, increment]
+  partida_id      int           [not null]
+  mes             mes_enum      [not null]
+  monto_ejercido  numeric(18,4) [not null, default: 0]
+  monto_pagado    numeric(18,4) [not null, default: 0]
+  referencia_oc   varchar(60)   [note: 'El presupuesto se ejerce al momento de elaborar la OC, no del pago']
+  actualizado_en  timestamptz   [not null, default: `now()`]
+
+  indexes {
+    (partida_id, mes) [unique]
+  }
+
+  Note: 'Real vs presupuesto. Permite calcular variacion por familia de gasto.'
+}
+
+Table bitacora_presupuesto {
+  id              int         [pk, increment]
+  presupuesto_id  int         [not null]
+  usuario_id      int
+  accion          varchar(40) [not null, note: 'creacion | captura | envio_revision | autorizacion | reproyeccion']
+  detalle         jsonb
+  registrado_en   timestamptz [not null, default: `now()`]
+
+  indexes {
+    (presupuesto_id, registrado_en)
+  }
+}
+
+// =============================================================================
+// 15b. CAPTURA COLABORATIVA: ASIGNACION POR RENGLON Y CONVERSACIONES
+// =============================================================================
+//
+// El "miembro de casino" no ve un departamento completo: solo los renglones que
+// le asignaron. Los demas los ve en gris, puede comentarlos, no editarlos.
+// =============================================================================
+
+Table partida_asignacion {
+  id            int         [pk, increment]
+  partida_id    int         [not null]
+  usuario_id    int         [not null]
+  asignado_por  int         [not null]
+  terminado     boolean     [not null, default: false, note: 'El miembro marca su parte como terminada']
+  terminado_en  timestamptz
+  asignado_en   timestamptz [not null, default: `now()`]
+
+  indexes {
+    (partida_id) [unique, name: 'ux_un_responsable_por_renglon']
+    (usuario_id)
+  }
+
+  Note: '''
+  Un renglon tiene a lo mas un responsable de captura. Sin fila aqui, el renglon
+  lo captura el encargado del departamento o el del casino.
+  '''
+}
+
+// -----------------------------------------------------------------------------
+// Comentarios sobre CUALQUIER registro de CUALQUIER tabla
+// -----------------------------------------------------------------------------
+// El ancla es polimorfica: objeto_sistema dice de que tabla se trata y
+// registro_id de que fila. Ejemplos:
+//
+//   Celda de marzo de un renglon -> objeto = partida_mes,         registro = 8842
+//   El renglon completo          -> objeto = presupuesto_partida, registro = 611
+//   El precio de un insumo       -> objeto = recurso_valor,       registro = 77
+//   Un puesto del tabulador      -> objeto = recurso_valor,       registro = 91
+//   Una compra, un activo, una licencia... cualquiera.
+//
+// ADVERTENCIA: una llave foranea polimorfica NO la puede validar PostgreSQL.
+// No hay FK real hacia registro_id. Mitigaciones previstas:
+//   1. objeto_id si es FK, asi que la tabla referida siempre existe.
+//   2. Las columnas de alcance (departamento, casino, ejercicio) se copian al
+//      crear el hilo: permiten filtrar y contar sin recorrer la tabla origen.
+//   3. Hace falta un job de limpieza de hilos huerfanos, o triggers de borrado
+//      por tabla comentable.
+// -----------------------------------------------------------------------------
+
+Enum estado_conversacion_enum {
+  abierta
+  resuelta
+}
+
+Table conversacion {
+  id            int                      [pk, increment]
+  objeto_id     int                      [not null, note: 'Que tabla se esta comentando']
+  registro_id   varchar(64)              [not null, note: 'Llave del registro comentado. Texto para admitir ids int y los ids de Better Auth']
+  campo         varchar(60)              [note: 'Nulo = el hilo es del registro completo. Con valor, es de esa columna']
+  estado        estado_conversacion_enum [not null, default: 'abierta']
+  bloqueante    boolean                  [not null, default: false, note: 'Impide aprobar el departamento hasta resolverse']
+
+  // Alcance copiado del registro comentado: el comentario hereda la
+  // visibilidad de aquello que comenta, y asi se filtra sin joins.
+  departamento_id   int
+  unidad_negocio_id int
+  ejercicio_id      int
+
+  abierta_por   int                      [not null]
+  resuelta_por  int
+  resuelta_en   timestamptz
+  creada_en     timestamptz              [not null, default: `now()`]
+
+  indexes {
+    (objeto_id, registro_id, campo) [name: 'ix_conversacion_ancla']
+    (estado, bloqueante)
+    (departamento_id, unidad_negocio_id, ejercicio_id) [name: 'ix_conversacion_alcance']
+  }
+
+  Note: '''
+  Hilo de comentarios. Quien no puede ver el registro tampoco puede ver su hilo:
+  el alcance copiado se cruza contra las asignaciones del usuario.
+  '''
+}
+
+Table mensaje {
+  id               int         [pk, increment]
+  conversacion_id  int         [not null]
+  mensaje_padre_id int         [note: 'Respuesta a un mensaje concreto. Nulo = mensaje al hilo']
+  usuario_id       int         [not null]
+  texto            text        [not null]
+  editado_en       timestamptz
+  eliminado_en     timestamptz [note: 'Borrado logico: el hilo debe conservar su historia']
+  creado_en        timestamptz [not null, default: `now()`]
+
+  indexes {
+    (conversacion_id, creado_en)
+    (mensaje_padre_id)
+  }
+}
+
+Enum estado_adjunto_enum {
+  pendiente  [note: 'Se firmo la URL de subida pero el archivo aun no se confirma en el bucket']
+  disponible
+  eliminado  [note: 'Borrado logico. Un job purga el objeto del bucket despues']
+}
+
+Table adjunto {
+  id              int                 [pk, increment]
+  mensaje_id      int                 [not null]
+  bucket          varchar(80)         [not null, note: 'Por si mas adelante hay mas de un bucket o region']
+  object_key      varchar(512)        [not null, note: 'LO UNICO que se guarda del archivo. El binario vive en el bucket']
+  nombre_archivo  varchar(255)        [not null, note: 'Nombre original, para mostrarlo y para la descarga']
+  mime            varchar(120)
+  tamano_bytes    bigint
+  checksum        varchar(128)        [note: 'Para detectar subidas incompletas o duplicadas']
+  estado          estado_adjunto_enum [not null, default: 'pendiente']
+  subido_por      int                 [not null]
+  subido_en       timestamptz         [not null, default: `now()`]
+  eliminado_en    timestamptz
+
+  indexes {
+    (mensaje_id)
+    (bucket, object_key) [unique]
+    (estado) [name: 'ix_adjunto_pendientes']
+  }
+
+  Note: '''
+  Archivo adjunto a un mensaje. La base guarda la llave del objeto, nunca el
+  binario. El estado existe porque con URLs prefirmadas la fila nace antes de
+  que la subida termine: si nunca pasa a disponible, un job la purga.
+  Al eliminar hay que borrar tambien el objeto del bucket, o quedan huerfanos
+  que siguen costando.
+  '''
+}
+
+// =============================================================================
+// 15c. CICLO DE REVISION Y DICTAMEN
+// =============================================================================
+//
+// El encargado envia su departamento cuando los casinos estan completos, pero
+// el superadmin dictamina casino por casino.
+// =============================================================================
+
+Enum estado_captura_enum {
+  sin_iniciar
+  en_captura
+  completo
+  enviado
+  aprobado
+  rechazado
+}
+
+Enum dictamen_enum {
+  aprobado_y_congelado
+  cambios_solicitados
+  rechazado
+}
+
+Table avance_captura {
+  id                  int                 [pk, increment]
+  presupuesto_id      int                 [not null, unique]
+  estado              estado_captura_enum [not null, default: 'sin_iniciar']
+  renglones_totales   int                 [not null, default: 0]
+  renglones_capturados int                [not null, default: 0]
+  conversaciones_abiertas int             [not null, default: 0]
+  conversaciones_bloqueantes int          [not null, default: 0]
+  actualizado_en      timestamptz         [not null, default: `now()`]
+
+  Note: 'Cache del avance por departamento x casino: "34 de 42 renglones", barra de %.'
+}
+
+Table envio_revision {
+  id               int         [pk, increment]
+  ejercicio_id     int         [not null]
+  departamento_id  int         [not null]
+  version          smallint    [not null, default: 1, note: 'V1, V2... la etiqueta que muestra la UI']
+  enviado_por      int         [not null]
+  enviado_en       timestamptz [not null, default: `now()`]
+  casinos_enviados int         [not null]
+  casinos_incompletos int      [not null, default: 0, note: 'Se permite enviar el resto y dejarlos abiertos']
+  nota             text
+
+  indexes {
+    (ejercicio_id, departamento_id, version) [unique]
+  }
+
+  Note: 'El envio es por departamento y abarca todos sus casinos.'
+}
+
+Table dictamen {
+  id                int           [pk, increment]
+  envio_revision_id int           [not null]
+  presupuesto_id    int           [not null, note: 'El dictamen se aplica casino por casino']
+  resultado         dictamen_enum [not null]
+  dictaminado_por   int           [not null]
+  dictaminado_en    timestamptz   [not null, default: `now()`]
+  comentario        text
+
+  indexes {
+    (envio_revision_id, presupuesto_id) [unique]
+  }
+
+  Note: 'Aprobar y congelar deja el presupuesto inmutable salvo reapertura del superadmin.'
+}
+
+// =============================================================================
+// 16. SEGURIDAD: ACCESO POR DEPARTAMENTO x CASINO
+// =============================================================================
+//
+// Regla de negocio a modelar
+// --------------------------
+// El encargado de un departamento ve UNICAMENTE su departamento (o los suyos,
+// si lleva mas de uno), pero lo ve en TODOS los casinos y puede cambiar de
+// casino libremente. Es decir: se restringe la dimension "departamento" y se
+// abre la dimension "unidad de negocio".
+//
+// Son dos ejes independientes, y por eso cada uno tiene su propio alcance:
+//   alcance = todos       -> comodin, no requiere filas hijas
+//   alcance = seleccion   -> se enumeran las filas permitidas
+//
+// Ejemplos que este modelo cubre:
+//   Jefe de Mkt corporativo  : deptos = [MKT],        udn = todos
+//   Jefe de TI de 2 plazas   : deptos = [TI],         udn = [GPE, MTY]
+//   Gerente de AyB de GPE    : deptos = [AYB],        udn = [GPE]
+//   Director de plaza        : deptos = todos,        udn = [GPE]
+//   Planeacion y Control     : deptos = todos,        udn = todos (solo lectura + autorizar)
+// =============================================================================
+
+Enum alcance_enum {
+  todos      [note: 'Comodin: aplica a todas las filas de esa dimension, incluidas las que se den de alta despues']
+  seleccion  [note: 'Se limita a las filas listadas en la tabla hija correspondiente']
+}
+
+Table rol {
+  id           int          [pk, increment]
+  clave        varchar(40)  [not null, unique, note: 'SUPERADMIN, PLANEACION_CONTROL, DIRECTOR_UDN, JEFE_DEPARTAMENTO, CAPTURISTA, CONSULTA']
+  nombre       varchar(120) [not null]
+  descripcion  varchar(255)
+  omite_restricciones boolean [not null, default: false, note: 'true SOLO para SUPERADMIN: ignora el filtro de departamento, unidad y centro de costo']
+  activo       boolean      [not null, default: true]
+
+  Note: 'El rol define QUE puede hacer. La asignacion define SOBRE QUE lo puede hacer.'
+}
+
+Table asignacion {
+  id                int           [pk, increment]
+  usuario_id        int           [not null]
+  rol_id            int           [not null]
+  alcance_departamento alcance_enum [not null, default: 'seleccion', note: 'Para un jefe de departamento siempre es seleccion']
+  alcance_unidad    alcance_enum  [not null, default: 'todos', note: 'todos = puede cambiar entre casinos sin restriccion']
+  alcance_centro_costo alcance_enum [not null, default: 'todos', note: 'Permite separar AyB de Operaciones dentro del mismo casino']
+  ejercicio_id      int           [note: 'Nulo = vigente para cualquier ejercicio']
+  vigente_desde     date          [not null, default: `CURRENT_DATE`]
+  vigente_hasta     date          [note: 'Nulo = sin vencimiento. Util para suplencias y personal temporal']
+  otorgado_por      int
+  creado_en         timestamptz   [not null, default: `now()`]
+
+  indexes {
+    (usuario_id, rol_id, ejercicio_id) [unique, name: 'ux_asignacion_vigente']
+    (usuario_id)
+  }
+
+  Note: '''
+  Una concesion de acceso. Un usuario puede tener varias: p.ej. jefe de TI en
+  todos los casinos MAS consulta general de su propia plaza.
+  El acceso efectivo es la UNION de todas sus asignaciones vigentes.
+  '''
+}
+
+Table asignacion_departamento {
+  asignacion_id    int [not null]
+  departamento_id  int [not null]
+
+  indexes {
+    (asignacion_id, departamento_id) [pk]
+  }
+
+  Note: 'Se llena solo cuando alcance_departamento = seleccion.'
+}
+
+Table asignacion_unidad {
+  asignacion_id      int [not null]
+  unidad_negocio_id  int [not null]
+
+  indexes {
+    (asignacion_id, unidad_negocio_id) [pk]
+  }
+
+  Note: 'Se llena solo cuando alcance_unidad = seleccion. Vacia = acceso a todos los casinos.'
+}
+
+Table asignacion_centro_costo {
+  asignacion_id    int [not null]
+  centro_costo_id  int [not null]
+
+  indexes {
+    (asignacion_id, centro_costo_id) [pk]
+  }
+
+  Note: 'Se llena solo cuando alcance_centro_costo = seleccion.'
+}
+
+Table usuario_contexto {
+  usuario_id         int         [pk, note: 'Un contexto activo por usuario']
+  unidad_negocio_id  int         [not null, note: 'Casino seleccionado en el selector de la UI']
+  ejercicio_id       int         [not null]
+  centro_costo_id    int
+  actualizado_en     timestamptz [not null, default: `now()`]
+
+  Note: '''
+  Recuerda el casino en el que quedo el usuario al cambiar de plaza.
+  Es solo preferencia de UI: NUNCA debe usarse como fuente de autorizacion,
+  el backend revalida contra asignacion en cada peticion.
+  '''
+}
+
+Enum resultado_acceso_enum {
+  permitido
+  denegado_departamento [note: 'Intento de leer un departamento fuera de su alcance']
+  denegado_unidad       [note: 'Intento de leer un casino fuera de su alcance']
+  denegado_permiso      [note: 'Tiene visibilidad pero no la accion (ej. capturar o autorizar)']
+}
+
+Table bitacora_acceso {
+  id                 bigint                [pk, increment]
+  usuario_id         int                   [not null]
+  resultado          resultado_acceso_enum [not null]
+  objeto             varchar(80)           [not null, note: 'Endpoint o entidad solicitada']
+  unidad_negocio_id  int
+  departamento_id    int
+  ip                 inet
+  user_agent         varchar(255)
+  registrado_en      timestamptz           [not null, default: `now()`]
+
+  indexes {
+    (usuario_id, registrado_en)
+    (resultado, registrado_en) [name: 'ix_bitacora_acceso_denegados']
+  }
+
+  Note: 'Evidencia de que nadie se paso a otro departamento. Los denegados alimentan alertas.'
+}
+
+// =============================================================================
+// 17. OBJETOS DEL SISTEMA: TODA TABLA ES GOBERNABLE
+// =============================================================================
+//
+// Cada tabla del sistema se registra en "objeto_sistema". Sobre un objeto se cuelgan
+// las tres cosas que puede necesitar cualquier entidad del modelo:
+//
+//   permiso  -> quien puede hacer que sobre el (objeto x accion)
+//   regla    -> validaciones, filtros y flujos que debe cumplir
+//   variable -> parametros configurables, con alcance global o por casino
+//
+// El truco para que el filtro de departamento x casino funcione sobre CUALQUIER
+// tabla sin escribir codigo caso por caso esta en las columnas ruta_*: dicen
+// como cada tabla alcanza esas dos dimensiones. Ejemplos:
+//
+//   presupuesto_partida -> ruta_departamento = departamento_id            (directa)
+//   partida_mes         -> ruta_departamento = partida_id > presupuesto_partida.departamento_id
+//   licencia            -> ruta_departamento = NULL  (catalogo global, no se filtra)
+// =============================================================================
+
+Enum accion_enum {
+  ver
+  crear
+  editar
+  eliminar
+  capturar      [note: 'Alta y cambio de montos mensuales; mas granular que editar']
+  autorizar
+  reabrir
+  exportar
+  administrar   [note: 'Gestionar el catalogo o la configuracion del objeto']
+}
+
+Enum tipo_objeto_enum {
+  tabla
+  vista
+  reporte
+  modulo        [note: 'Agrupador logico, p.ej. una cedula completa']
+  operacion     [note: 'Accion de negocio sin tabla propia, p.ej. cierre de ejercicio']
+}
+
+Enum efecto_enum {
+  permitir
+  denegar       [note: 'Gana sobre permitir. Sirve para excluir a alguien de un objeto puntual']
+}
+
+Table objeto_sistema {
+  id                  int               [pk, increment]
+  clave               varchar(80)       [not null, unique, note: 'Nombre de la tabla o del modulo: presupuesto_partida, partida_mes, impuesto_mes, usuario...']
+  nombre              varchar(150)      [not null]
+  tipo                tipo_objeto_enum  [not null, default: 'tabla']
+  modulo              varchar(40)       [not null, note: 'Agrupador para la UI: catalogos, nucleo, materia_prima, fiscal, seguridad...']
+  departamento_id     int               [note: 'Departamento dueno del objeto. Nulo = transversal']
+  ruta_departamento   varchar(255)      [note: 'Como llega esta tabla a un departamento. Nulo = no aplica filtro por departamento']
+  ruta_unidad         varchar(255)      [note: 'Como llega esta tabla a una unidad de negocio. Nulo = catalogo global']
+  comentable          boolean           [not null, default: true, note: 'Si sus registros admiten hilos de comentarios. Se apaga en las tablas de auth y bitacoras']
+  requiere_auditoria  boolean           [not null, default: false, note: 'Registrar toda lectura, no solo las denegadas']
+  sensible            boolean           [not null, default: false, note: 'Datos restringidos: nomina, impuestos, participacion']
+  activo              boolean           [not null, default: true]
+
+  Note: '''
+  Catalogo de todo lo gobernable. Se siembra a partir de las tablas del esquema,
+  de modo que una tabla nueva sin objeto registrado queda cerrada por omision
+  en lugar de quedar abierta.
+  '''
+}
+
+Table permiso {
+  id          int          [pk, increment]
+  objeto_id   int          [not null]
+  accion      accion_enum  [not null]
+  campo       varchar(60)  [note: 'Nulo = toda la fila. Con valor, el permiso es de esa columna: cantidad, precio, cuenta_contable_id']
+  clave       varchar(120) [not null, unique, note: 'Generada: objeto.campo.accion, p.ej. recurso.precio.editar']
+  descripcion varchar(255)
+
+  indexes {
+    (objeto_id, accion, campo) [unique]
+  }
+
+  Note: '''
+  El campo permite lo que pide el panel "Que puedes cambiar aqui":
+  cantidad editable por el casino, precio solo por el encargado del
+  departamento dueno, cuenta contable solo por el superadmin.
+  '''
+}
+
+Table rol_permiso {
+  rol_id      int         [not null]
+  permiso_id  int         [not null]
+  efecto      efecto_enum [not null, default: 'permitir']
+
+  indexes {
+    (rol_id, permiso_id) [pk]
+  }
+}
+
+Table asignacion_permiso {
+  asignacion_id int         [not null]
+  permiso_id    int         [not null]
+  efecto        efecto_enum [not null]
+  motivo        varchar(255) [note: 'Por que este usuario se sale de lo que da su rol']
+
+  indexes {
+    (asignacion_id, permiso_id) [pk]
+  }
+
+  Note: '''
+  Excepcion puntual sobre el rol, en cualquiera de los dos sentidos.
+  Resolucion: denegar explicito > permitir explicito > permiso del rol > negado.
+  '''
+}
+
+Enum tipo_regla_enum {
+  validacion  [note: 'Impide guardar: factor maximo, monto no negativo, crecimiento minimo de 10% en ingresos']
+  visibilidad [note: 'Filtro de filas adicional al de departamento y casino']
+  calculo     [note: 'Deriva un valor: factores de nomina, precio de cajetilla, % MP optimo']
+  flujo       [note: 'Condiciona el cambio de estado: no autorizar si hay partidas en cero']
+  alerta      [note: 'No bloquea, notifica: MP sobre el benchmark del 2%']
+}
+
+Table regla {
+  id                int             [pk, increment]
+  objeto_id         int             [not null]
+  clave             varchar(80)     [not null]
+  nombre            varchar(180)    [not null]
+  tipo              tipo_regla_enum [not null]
+  condicion         jsonb           [note: 'Cuando aplica, en formato evaluable por el backend']
+  expresion         text            [note: 'Que se evalua o se calcula']
+  mensaje           varchar(255)    [note: 'Texto mostrado al usuario cuando la regla no se cumple']
+  severidad         varchar(20)     [not null, default: 'error', note: 'error | advertencia | informativa']
+  departamento_id   int             [note: 'Nulo = aplica a todos los departamentos']
+  unidad_negocio_id int             [note: 'Nulo = aplica a todos los casinos']
+  ejercicio_id      int             [note: 'Nulo = aplica a cualquier ejercicio']
+  orden             smallint        [not null, default: 100]
+  activo            boolean         [not null, default: true]
+  creado_por        int
+  creado_en         timestamptz     [not null, default: `now()`]
+
+  indexes {
+    (objeto_id, clave) [unique]
+    (objeto_id, activo, orden)
+  }
+
+  Note: '''
+  Sustituye las notas de las hojas ("Consideraciones" y "Para Calculo") por algo
+  ejecutable. Ejemplo real: en Ingresos, crecimiento minimo del 10% respecto al
+  real del anio anterior; en Renta, factor 5% por contrato.
+  '''
+}
+
+Enum ambito_variable_enum {
+  global
+  ejercicio
+  unidad_negocio
+  departamento
+  centro_costo
+  usuario
+}
+
+Table variable {
+  id                int                  [pk, increment]
+  objeto_id         int                  [note: 'Nulo = variable de sistema, no atada a una tabla']
+  clave             varchar(80)          [not null, note: 'tipo_cambio, inflacion, bm_mp_vs_ingreso, pct_ventas_tpv, dias_pedido_cigarro']
+  nombre            varchar(180)         [not null]
+  ambito            ambito_variable_enum [not null, default: 'global']
+  tipo_dato         varchar(20)          [not null, default: 'numeric', note: 'numeric | texto | booleano | fecha | json']
+  valor             text                 [not null]
+  unidad            varchar(20)          [note: 'pesos | porcentaje | factor | dias']
+  ejercicio_id      int
+  unidad_negocio_id int
+  departamento_id   int
+  centro_costo_id   int
+  usuario_id        int
+  editable_por_rol_id int                [note: 'Rol minimo que puede cambiarla']
+  vigente_desde     date
+  vigente_hasta     date
+  actualizado_en    timestamptz          [not null, default: `now()`]
+
+  indexes {
+    (clave, ambito, ejercicio_id, unidad_negocio_id, departamento_id) [unique, name: 'ux_variable_por_alcance']
+  }
+
+  Note: '''
+  Parametros configurables con herencia: se resuelve de lo mas especifico a lo
+  mas general (usuario > centro de costo > departamento > casino > ejercicio >
+  global). Reemplaza la tabla parametro_global, que era el caso "global".
+  '''
+}
+
+// =============================================================================
+// 18. AUTENTICACION (Better Auth)
+// =============================================================================
+//
+// ESTAS TABLAS NO SE MIGRAN A MANO. Better Auth las genera y las versiona:
+//
+//     npx @better-auth/cli generate
+//
+// Aqui se dibujan solo para que el diagrama muestre por donde entra la gente al
+// sistema. Si alguna columna no coincide con lo que emita el CLI, manda el CLI.
+//
+// Reparto de responsabilidades
+// ----------------------------
+//   Better Auth  -> AUTENTICACION: quien eres. Credenciales, sesiones,
+//                   proveedores OAuth, verificacion de correo, 2FA.
+//   Este esquema  -> AUTORIZACION: que puedes ver y tocar. Departamento, casino,
+//                   rol, permiso por campo, reglas.
+//
+// El plugin de organizaciones de Better Auth trae roles propios, pero son
+// planos (owner / admin / member) y se declaran en codigo. No alcanzan para
+// departamento x casino x campo, asi que la autorizacion se queda aqui.
+//
+// Nombres de tabla
+// ----------------
+// Se usa el prefijo auth_ porque "user" y "session" son palabras reservadas en
+// PostgreSQL. Se configura con modelName en la definicion de cada modelo.
+//
+// Los ids son texto: Better Auth los genera. Por eso usuario NO usa ese id como
+// llave primaria; lo referencia en auth_user_id y conserva su propio int, para
+// no arrastrar 20 llaves foraneas del esquema a tipo texto.
+// =============================================================================
+
+Table auth_user {
+  id             varchar(64)  [pk, note: 'Generado por Better Auth']
+  name           varchar(255) [not null]
+  email          varchar(255) [not null, unique]
+  email_verified boolean      [not null, default: false]
+  image          text
+  created_at     timestamptz  [not null, default: `now()`]
+  updated_at     timestamptz  [not null, default: `now()`]
+
+  Note: 'Identidad de acceso. El perfil de negocio vive en usuario.'
+}
+
+Table auth_session {
+  id              varchar(64)  [pk]
+  user_id         varchar(64)  [not null]
+  token           varchar(255) [not null, unique]
+  expires_at      timestamptz  [not null]
+  ip_address      varchar(64)
+  user_agent      text
+  created_at      timestamptz  [not null, default: `now()`]
+  updated_at      timestamptz  [not null, default: `now()`]
+
+  indexes {
+    (user_id)
+  }
+
+  Note: 'Sesion activa. No confundir con usuario_contexto, que es preferencia de UI.'
+}
+
+Table auth_account {
+  id                       varchar(64) [pk]
+  user_id                  varchar(64) [not null]
+  account_id               varchar(255) [not null]
+  provider_id              varchar(64)  [not null, note: 'credential | google | microsoft...']
+  password                 text         [note: 'Hash de la contrasena cuando provider_id = credential']
+  access_token             text
+  refresh_token            text
+  access_token_expires_at  timestamptz
+  refresh_token_expires_at timestamptz
+  scope                    text
+  id_token                 text
+  created_at               timestamptz [not null, default: `now()`]
+  updated_at               timestamptz [not null, default: `now()`]
+
+  indexes {
+    (provider_id, account_id) [unique]
+    (user_id)
+  }
+
+  Note: 'Credenciales y vinculos con proveedores externos. Aqui vive el hash, no en usuario.'
+}
+
+Table auth_verification {
+  id         varchar(64)  [pk]
+  identifier varchar(255) [not null, note: 'Correo o telefono al que se envio el codigo']
+  value      varchar(255) [not null]
+  expires_at timestamptz  [not null]
+  created_at timestamptz  [not null, default: `now()`]
+  updated_at timestamptz  [not null, default: `now()`]
+
+  indexes {
+    (identifier)
+  }
+
+  Note: 'Tokens de verificacion de correo y de recuperacion de contrasena.'
+}
+
+// =============================================================================
+// 19. METRICAS Y PRONOSTICOS
+// =============================================================================
+//
+// Catalogo de metricas de negocio (MAU, DAU, ARPU) y la salida del modelo que
+// las proyecta. Convive con demanda_mes: ver la nota de metric_forecast.
+//
+// Nota de convencion: estas dos tablas conservan nombres en ingles y llave uuid
+// porque asi llegaron de su definicion original. El resto del esquema usa
+// espanol y llaves int; el enlace con unidad_negocio cruza esa frontera.
+// =============================================================================
+
+Enum metric_unit {
+  count       [note: 'Usuarios, visitas, piezas']
+  currency    [note: 'Pesos']
+  percentage
+  ratio       [note: 'Adimensional: cajetillas por cliente, vasos por visita']
+  duration    [note: 'Minutos o horas de permanencia']
+}
+
+Enum metric_granularity {
+  daily
+  weekly
+  monthly
+  quarterly
+  yearly
+}
+
+// La metrica se identifica por enum, no por uuid: el codigo es la llave con la
+// que la consume todo el sistema y el compilador la valida.
+// Agregar una metrica nueva es ALTER TYPE ... ADD VALUE, es decir, migracion.
+Enum metric_code {
+  DAU   [note: 'Daily Active Users']
+  MAU   [note: 'Monthly Active Users']
+  ARPU  [note: 'Average Revenue Per User']
+}
+
+Table metric_definition {
+  code        metric_code        [pk]
+  name        varchar(150)       [not null, note: 'Monthly Active Users']
+  description text
+  unit        metric_unit        [not null]
+  granularity metric_granularity [not null]
+  activo      boolean            [not null, default: true]
+  created_at  timestamptz        [not null, default: `now()`]
+
+  Note: '''
+  Metadatos de cada metrica. El enum define QUE metricas existen; esta tabla
+  guarda su unidad, granularidad y nombre legible, para que un reporte no
+  tenga que preguntarle a la aplicacion como se interpreta un numero.
+  Si prefieres cero tablas, esta se puede borrar y los metadatos viven en un
+  mapa de constantes; el enum de metric_forecast sigue funcionando igual.
+  '''
+}
+
+Table metric_forecast {
+  id                   varchar(36)   [pk, default: `gen_random_uuid()`]
+  metric_code          metric_code   [not null]
+  unidad_negocio_id    int           [not null, note: 'El casino al que corresponde el pronostico']
+  fecha                date          [not null, note: 'Inicio del periodo pronosticado. Con granularity mensual, el dia 1']
+  valor_predicho       numeric(18,6) [not null]
+  valor_minimo         numeric(18,6) [note: 'Cota inferior del intervalo de confianza']
+  valor_maximo         numeric(18,6) [note: 'Cota superior del intervalo de confianza']
+  nivel_confianza      numeric(5,4)  [note: 'Ej. 0.95. Sin esto, minimo y maximo no se pueden interpretar']
+  modelo               varchar(60)   [note: 'Que lo produjo: prophet, arima, xgboost...']
+  version_modelo       varchar(40)   [note: 'Para comparar corridas y poder reproducir un numero viejo']
+  generado_en          timestamptz   [not null, default: `now()`, note: 'CUANDO se predijo, distinto de la fecha pronosticada']
+
+  indexes {
+    (metric_code, unidad_negocio_id, fecha, generado_en) [unique]
+    (unidad_negocio_id, fecha)
+  }
+
+  Note: '''
+  Salida del modelo. Guardar generado_en ademas de fecha es lo que permite
+  responder "que estaba prediciendo el modelo hace un mes" y medir su error
+  contra lo que realmente paso.
+
+  Traslape a resolver: demanda_mes ya guarda el DAU real por casino y mes, y es
+  lo que alimenta el presupuesto de AyB. Si el DAU tambien se pronostica aqui,
+  hay que decidir cual manda. Lo natural: demanda_mes guarda el valor en firme
+  que usa el presupuesto, y metric_forecast la proyeccion que lo sugiere.
+  '''
+}
+
+// =============================================================================
+// RELACIONES
+// =============================================================================
+
+Ref: unidad_negocio.empresa_id > empresa.id
+Ref: centro_costo.unidad_negocio_id > unidad_negocio.id
+Ref: calendario_mes.ejercicio_id > ejercicio.id
+
+Ref: usuario.departamento_id > departamento.id
+Ref: usuario.auth_user_id - auth_user.id
+
+// --- Metricas y pronosticos ---
+Ref: metric_forecast.metric_code > metric_definition.code
+Ref: metric_forecast.unidad_negocio_id > unidad_negocio.id
+
+// --- Better Auth (las genera el CLI, aqui solo se dibujan) ---
+Ref: auth_session.user_id > auth_user.id
+Ref: auth_account.user_id > auth_user.id
+Ref: cedula.departamento_id > departamento.id
+Ref: cedula_nota.cedula_id > cedula.id
+Ref: categoria.cedula_id > cedula.id
+Ref: categoria.categoria_padre_id > categoria.id
+Ref: categoria.departamento_id > departamento.id
+Ref: categoria.usuario_responsable_id > usuario.id
+Ref: concepto.categoria_id > categoria.id
+
+Ref: presupuesto.ejercicio_id > ejercicio.id
+Ref: presupuesto.unidad_negocio_id > unidad_negocio.id
+Ref: presupuesto.centro_costo_id > centro_costo.id
+Ref: presupuesto.autorizado_por > usuario.id
+
+Ref: presupuesto_partida.presupuesto_id > presupuesto.id
+Ref: presupuesto_partida.concepto_id > concepto.id
+Ref: presupuesto_partida.recurso_id > recurso.id
+Ref: presupuesto_partida.cuenta_contable_id > cuenta_contable.id
+Ref: presupuesto_partida.departamento_id > departamento.id
+Ref: partida_mes.partida_id > presupuesto_partida.id
+Ref: partida_enlace.partida_destino_id > presupuesto_partida.id
+Ref: partida_enlace.partida_origen_id > presupuesto_partida.id
+
+Ref: ingreso_mes.presupuesto_id > presupuesto.id
+
+Ref: nomina_prestacion.presupuesto_id > presupuesto.id
+
+Ref: evento_integracion.presupuesto_id > presupuesto.id
+Ref: evento_integracion.concepto_id > concepto.id
+
+Ref: viaje_presupuestado.presupuesto_id > presupuesto.id
+
+Ref: licencia_partida.presupuesto_id > presupuesto.id
+Ref: licencia_partida.licencia_id > licencia.id
+
+Ref: regalia_maquina.presupuesto_id > presupuesto.id
+Ref: regalia_mesa.presupuesto_id > presupuesto.id
+
+Ref: mp_insumo_bloque.presupuesto_id > presupuesto.id
+Ref: mp_insumo_bloque_mes.bloque_id > mp_insumo_bloque.id
+Ref: mp_resumen_mes.presupuesto_id > presupuesto.id
+
+Ref: historico_mensual_udn.unidad_negocio_id > unidad_negocio.id
+Ref: historico_insumo.unidad_negocio_id > unidad_negocio.id
+
+Ref: tasa_tpv.proveedor_tpv_id > proveedor_tpv.id
+Ref: tasa_tpv.ejercicio_id > ejercicio.id
+Ref: comision_tpv_partida.presupuesto_id > presupuesto.id
+Ref: comision_tpv_partida.proveedor_tpv_id > proveedor_tpv.id
+
+Ref: activo_fijo.presupuesto_id > presupuesto.id
+Ref: activo_fijo.categoria_id > categoria.id
+Ref: depreciacion_mes.presupuesto_id > presupuesto.id
+Ref: depreciacion_mes.activo_fijo_id > activo_fijo.id
+
+Ref: base_fiscal_mes.presupuesto_id > presupuesto.id
+Ref: impuesto_mes.presupuesto_id > presupuesto.id
+Ref: impuesto_mes.tipo_impuesto_id > tipo_impuesto.id
+Ref: participacion_mes.presupuesto_id > presupuesto.id
+
+// --- Recursos de negocio ---
+Ref: recurso.departamento_id > departamento.id
+Ref: recurso.cuenta_contable_id > cuenta_contable.id
+Ref: recurso_valor.recurso_id > recurso.id
+Ref: recurso_valor.confirmado_por > usuario.id
+Ref: recurso_cantidad.recurso_id > recurso.id
+Ref: recurso_cantidad.unidad_negocio_id > unidad_negocio.id
+Ref: recurso_cantidad.ejercicio_id > ejercicio.id
+Ref: demanda_mes.unidad_negocio_id > unidad_negocio.id
+Ref: demanda_mes.ejercicio_id > ejercicio.id
+Ref: recurso_factor.recurso_id > recurso.id
+Ref: recurso_factor.unidad_negocio_id > unidad_negocio.id
+Ref: recurso_factor.ejercicio_id > ejercicio.id
+Ref: recurso_recalculo.recurso_id > recurso.id
+Ref: recurso_recalculo.ejercicio_id > ejercicio.id
+Ref: recurso_recalculo.disparado_por > usuario.id
+
+// --- Captura colaborativa ---
+Ref: partida_asignacion.partida_id > presupuesto_partida.id
+Ref: partida_asignacion.usuario_id > usuario.id
+Ref: partida_asignacion.asignado_por > usuario.id
+Ref: conversacion.objeto_id > objeto_sistema.id
+Ref: conversacion.departamento_id > departamento.id
+Ref: conversacion.unidad_negocio_id > unidad_negocio.id
+Ref: conversacion.ejercicio_id > ejercicio.id
+Ref: conversacion.abierta_por > usuario.id
+Ref: conversacion.resuelta_por > usuario.id
+Ref: mensaje.conversacion_id > conversacion.id
+Ref: mensaje.mensaje_padre_id > mensaje.id
+Ref: mensaje.usuario_id > usuario.id
+Ref: adjunto.mensaje_id > mensaje.id
+Ref: adjunto.subido_por > usuario.id
+
+// --- Revision y dictamen ---
+Ref: avance_captura.presupuesto_id > presupuesto.id
+Ref: envio_revision.ejercicio_id > ejercicio.id
+Ref: envio_revision.departamento_id > departamento.id
+Ref: envio_revision.enviado_por > usuario.id
+Ref: dictamen.envio_revision_id > envio_revision.id
+Ref: dictamen.presupuesto_id > presupuesto.id
+Ref: dictamen.dictaminado_por > usuario.id
+Ref: ejercicio.cerrado_por > usuario.id
+
+Ref: ejercido_mes.partida_id > presupuesto_partida.id
+Ref: bitacora_presupuesto.presupuesto_id > presupuesto.id
+Ref: bitacora_presupuesto.usuario_id > usuario.id
+
+// --- Seguridad ---
+Ref: objeto_sistema.departamento_id > departamento.id
+Ref: permiso.objeto_id > objeto_sistema.id
+Ref: rol_permiso.rol_id > rol.id
+Ref: rol_permiso.permiso_id > permiso.id
+Ref: asignacion_permiso.asignacion_id > asignacion.id
+Ref: asignacion_permiso.permiso_id > permiso.id
+
+Ref: regla.objeto_id > objeto_sistema.id
+Ref: regla.departamento_id > departamento.id
+Ref: regla.unidad_negocio_id > unidad_negocio.id
+Ref: regla.ejercicio_id > ejercicio.id
+Ref: regla.creado_por > usuario.id
+
+Ref: variable.objeto_id > objeto_sistema.id
+Ref: variable.ejercicio_id > ejercicio.id
+Ref: variable.unidad_negocio_id > unidad_negocio.id
+Ref: variable.departamento_id > departamento.id
+Ref: variable.centro_costo_id > centro_costo.id
+Ref: variable.usuario_id > usuario.id
+Ref: variable.editable_por_rol_id > rol.id
+
+Ref: asignacion.usuario_id > usuario.id
+Ref: asignacion.rol_id > rol.id
+Ref: asignacion.ejercicio_id > ejercicio.id
+Ref: asignacion.otorgado_por > usuario.id
+
+Ref: asignacion_departamento.asignacion_id > asignacion.id
+Ref: asignacion_departamento.departamento_id > departamento.id
+Ref: asignacion_unidad.asignacion_id > asignacion.id
+Ref: asignacion_unidad.unidad_negocio_id > unidad_negocio.id
+Ref: asignacion_centro_costo.asignacion_id > asignacion.id
+Ref: asignacion_centro_costo.centro_costo_id > centro_costo.id
+
+Ref: usuario_contexto.usuario_id > usuario.id
+Ref: usuario_contexto.unidad_negocio_id > unidad_negocio.id
+Ref: usuario_contexto.ejercicio_id > ejercicio.id
+Ref: usuario_contexto.centro_costo_id > centro_costo.id
+
+Ref: bitacora_acceso.usuario_id > usuario.id
+Ref: bitacora_acceso.unidad_negocio_id > unidad_negocio.id
+Ref: bitacora_acceso.departamento_id > departamento.id
+
+// =============================================================================
+// AGRUPACIONES PARA EL DIAGRAMA
+// =============================================================================
+
+// Estructura organizacional y parametros
+TableGroup catalogos {
+  empresa
+  unidad_negocio
+  centro_costo
+  departamento
+  usuario
+  ejercicio
+  calendario_mes
+}
+
+// Definicion de las hojas del libro
+TableGroup estructura_cedulas {
+  cedula
+  cedula_nota
+  categoria
+  concepto
+}
+
+// Cabecera, renglones y valores mensuales
+TableGroup nucleo {
+  presupuesto
+  presupuesto_partida
+  partida_mes
+  partida_enlace
+}
+
+// Catalogo de precios, parametros y tabuladores
+TableGroup recursos {
+  recurso
+  recurso_valor
+  recurso_cantidad
+  recurso_factor
+  demanda_mes
+  recurso_recalculo
+  cuenta_contable
+}
+
+// Captura colaborativa y ciclo de revision
+TableGroup colaboracion {
+  partida_asignacion
+  conversacion
+  mensaje
+  adjunto
+  avance_captura
+  envio_revision
+  dictamen
+}
+
+// Nomina y Gente y Cultura
+TableGroup rh {
+  nomina_prestacion
+  evento_integracion
+}
+
+// Ingresos, licencias, regalias y viaticos
+TableGroup operacion {
+  ingreso_mes
+  licencia
+  licencia_partida
+  regalia_maquina
+  regalia_mesa
+  viaje_presupuestado
+}
+
+// MP AyB: insumos
+TableGroup materia_prima {
+  mp_insumo_bloque
+  mp_insumo_bloque_mes
+  mp_resumen_mes
+}
+
+// Referencia del anio anterior
+TableGroup historicos {
+  historico_mensual_udn
+  historico_insumo
+}
+
+// TPV, activos e impuestos
+TableGroup financiero_fiscal {
+  proveedor_tpv
+  tasa_tpv
+  comision_tpv_partida
+  activo_fijo
+  depreciacion_mes
+  base_fiscal_mes
+  tipo_impuesto
+  impuesto_mes
+  participacion_mes
+}
+
+// Seguimiento presupuestal
+TableGroup control {
+  ejercido_mes
+  bitacora_presupuesto
+}
+
+// Metricas de negocio y salida del modelo
+TableGroup metricas {
+  metric_definition
+  metric_forecast
+}
+
+// Better Auth: quien eres
+TableGroup autenticacion {
+  auth_user
+  auth_session
+  auth_account
+  auth_verification
+}
+
+// Acceso por departamento x casino: que puedes tocar
+TableGroup seguridad {
+  rol
+  objeto_sistema
+  permiso
+  rol_permiso
+  asignacion_permiso
+  regla
+  variable
+  asignacion
+  asignacion_departamento
+  asignacion_unidad
+  asignacion_centro_costo
+  usuario_contexto
+  bitacora_acceso
+}
+

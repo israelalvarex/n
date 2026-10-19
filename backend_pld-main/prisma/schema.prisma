@@ -1,0 +1,1696 @@
+// =============================================================================
+// schema.prisma  ·  generado desde docs/db/presupuesto.dbml
+//
+// NO editar a mano si el DBML sigue siendo la fuente de verdad: regenerar.
+// Todo en ingles: tablas y columnas fisicas en snake_case, la API de Prisma en
+// camelCase / PascalCase. app_user y app_role llevan prefijo porque user y
+// role son palabras reservadas o riesgosas en PostgreSQL.
+//
+// Las tablas auth_* las administra Better Auth. Estan aqui para que Prisma
+// conozca las relaciones, pero sus migraciones las emite el CLI de Better Auth.
+// =============================================================================
+
+generator client {
+  provider     = "prisma-client"
+  output       = "../generated/prisma"
+  // NestJS compila a CommonJS. Sin esto el cliente sale con import.meta.url,
+  // que es sintaxis ESM, y Node se niega a cargarlo desde dist/.
+  moduleFormat = "cjs"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum Month {
+  jan
+  feb
+  mar
+  apr
+  may
+  jun
+  jul
+  aug
+  sep
+  oct
+  nov
+  dec
+
+  @@map("month")
+}
+
+enum LineNature {
+  revenue
+  expense
+  rawMaterialCost
+  payroll
+  tax
+  asset
+  depreciation
+  indicator
+
+  @@map("line_nature")
+}
+
+enum Scenario {
+  base
+  target
+  aggressive
+
+  @@map("scenario")
+}
+
+enum BudgetStatus {
+  draft
+  inReview
+  approved
+  closed
+  reforecast
+
+  @@map("budget_status")
+}
+
+enum Frequency {
+  monthly
+  daily
+  perHeadcount
+  perEvent
+  variable
+  yearly
+  bimonthly
+  quarterly
+  biannual
+  seasonal
+
+  @@map("frequency")
+}
+
+enum ResourceType {
+  parameter
+  supply
+  payScale
+  rate
+
+  @@map("resource_type")
+}
+
+enum QuantitySource {
+  fixed
+  derivedFromDau
+
+  @@map("quantity_source")
+}
+
+enum LineSource {
+  resource
+  formula
+  parameter
+  manual
+  previous_year
+  forecast
+
+  @@map("line_source")
+}
+
+enum RevenueStream {
+  slots
+  tables
+  sportsbook
+  fnbThirdParty
+  loyaltyClub
+  casinoComps
+  events
+  other
+
+  @@map("revenue_stream")
+}
+
+enum LicenseType {
+  external
+  internal
+
+  @@map("license_type")
+}
+
+enum MachineOwnership {
+  ownedCdm
+  ownedFmx
+  leasedFromVendor
+
+  @@map("machine_ownership")
+}
+
+enum SupplyBlockType {
+  thirdPartySales
+  aggressivePromos
+  foodComps
+  employeeComps
+
+  @@map("supply_block_type")
+}
+
+enum SupplyHistoryType {
+  packsSold
+  cigarettePurchase
+  bagInBoxPurchase
+
+  @@map("supply_history_type")
+}
+
+enum CardType {
+  debit
+  credit
+  average
+
+  @@map("card_type")
+}
+
+enum TaxLine {
+  slots
+  sportsbook
+  tables
+  fnb
+
+  @@map("tax_line")
+}
+
+enum ThreadStatus {
+  open
+  resolved
+
+  @@map("thread_status")
+}
+
+enum AttachmentStatus {
+  pending
+  available
+  deleted
+
+  @@map("attachment_status")
+}
+
+enum CaptureStatus {
+  notStarted
+  inProgress
+  complete
+  submitted
+  approved
+  rejected
+
+  @@map("capture_status")
+}
+
+enum ReviewOutcome {
+  approvedAndFrozen
+  changesRequested
+  rejected
+
+  @@map("review_outcome")
+}
+
+enum ScopeMode {
+  all
+  selected
+
+  @@map("scope_mode")
+}
+
+enum AccessResult {
+  allowed
+  deniedDepartment
+  deniedBusinessUnit
+  deniedPermission
+
+  @@map("access_result")
+}
+
+enum Action {
+  read
+  create
+  update
+  delete
+  capture
+  approve
+  reopen
+  export
+  manage
+
+  @@map("action")
+}
+
+enum SystemObjectType {
+  table
+  view
+  report
+  module
+  operation
+
+  @@map("system_object_type")
+}
+
+enum PermissionEffect {
+  allow
+  deny
+
+  @@map("permission_effect")
+}
+
+enum SettingScope {
+  global
+  fiscalYear
+  businessUnit
+  department
+  costCenter
+  user
+
+  @@map("setting_scope")
+}
+
+enum MetricUnit {
+  count
+  currency
+  percentage
+  ratio
+  duration
+
+  @@map("metric_unit")
+}
+
+enum MetricGranularity {
+  daily
+  weekly
+  monthly
+  quarterly
+  yearly
+
+  @@map("metric_granularity")
+}
+
+enum MetricDefinitionType {
+  budgeted
+  forecasted
+  manual
+
+  @@map("metric_definition_type")
+}
+
+model Company {
+  id           Int            @id @default(autoincrement())
+  code         String         @unique @db.VarChar(20)
+  legalName    String         @map("legal_name") @db.VarChar(255)
+  taxId        String?        @map("tax_id") @db.VarChar(13)
+  active       Boolean        @default(true)
+  createdAt    DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
+  businessUnit BusinessUnit[]
+
+  @@map("company")
+}
+
+model BusinessUnit {
+  id                         Int                          @id @default(autoincrement())
+  companyId                  Int                          @map("company_id")
+  code                       String                       @unique @db.VarChar(20)
+  name                       String                       @db.VarChar(150)
+  type                       String                       @db.VarChar(30)
+  city                       String?                      @db.VarChar(100)
+  active                     Boolean                      @default(true)
+  company                    Company                      @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  costCenter                 CostCenter[]
+  metricForecast             MetricForecast[]
+  metricTraining             MetricTraining[]
+  metricResource             MetricResource[]
+  metricResourceValue        MetricResourceValue[]
+  budget                     Budget[]
+  businessUnitMonthlyHistory BusinessUnitMonthlyHistory[]
+  supplyHistory              SupplyHistory[]
+  resourceQuantity           ResourceQuantity[]
+  monthlyDemand              MonthlyDemand[]
+  resourceFactor             ResourceFactor[]
+  commentThread              CommentThread[]
+  setting                    Setting[]
+  accessGrantBusinessUnit    AccessGrantBusinessUnit[]
+  userContext                UserContext[]
+  accessLog                  AccessLog[]
+  metricBudgetMonth          MetricBudgetMonth[]
+
+  @@map("business_unit")
+}
+
+model CostCenter {
+  id                    Int                     @id @default(autoincrement())
+  businessUnitId        Int                     @map("business_unit_id")
+  code                  String                  @db.VarChar(20)
+  name                  String                  @db.VarChar(150)
+  active                Boolean                 @default(true)
+  businessUnit          BusinessUnit            @relation(fields: [businessUnitId], references: [id], onDelete: Restrict)
+  budget                Budget[]
+  setting               Setting[]
+  accessGrantCostCenter AccessGrantCostCenter[]
+  userContext           UserContext[]
+
+  @@unique([businessUnitId, code])
+  @@map("cost_center")
+}
+
+model User {
+  id                             Int                      @id @default(autoincrement())
+  authUserId                     String?                  @unique @map("auth_user_id") @db.VarChar(64)
+  departmentId                   Int?                     @map("department_id")
+  name                           String                   @db.VarChar(150)
+  jobTitle                       String?                  @map("job_title") @db.VarChar(150)
+  email                          String                   @unique @db.VarChar(180)
+  isSuperadmin                   Boolean                  @default(false) @map("is_superadmin")
+  active                         Boolean                  @default(true)
+  lastLogin                      DateTime?                @map("last_login") @db.Timestamptz(6)
+  createdAt                      DateTime                 @default(now()) @map("created_at") @db.Timestamptz(6)
+  department                     Department?              @relation(fields: [departmentId], references: [id], onDelete: Restrict)
+  authUser                       AuthUser?                @relation(fields: [authUserId], references: [id], onDelete: Restrict)
+  category                       Category[]
+  budget                         Budget[]
+  metricResource                 MetricResource[]
+  metricResourceValue            MetricResourceValue[]
+  metricResourceSnapshot         MetricResourceSnapshot[]
+  resourceValue                  ResourceValue[]
+  resourceRecalculation          ResourceRecalculation[]
+  budgetLineAssignmentUser       BudgetLineAssignment[]   @relation("partida_asignacion_usuario_id")
+  budgetLineAssignmentAssignedBy BudgetLineAssignment[]   @relation("partida_asignacion_asignado_por")
+  commentThreadOpenedBy          CommentThread[]          @relation("conversacion_abierta_por")
+  commentThreadResolvedBy        CommentThread[]          @relation("conversacion_resuelta_por")
+  message                        Message[]
+  attachment                     Attachment[]
+  reviewSubmission               ReviewSubmission[]
+  reviewDecision                 ReviewDecision[]
+  fiscalYear                     FiscalYear[]
+  budgetAuditLog                 BudgetAuditLog[]
+  setting                        Setting[]
+  accessGrantUser                AccessGrant[]            @relation("asignacion_usuario_id")
+  accessGrantGrantedBy           AccessGrant[]            @relation("asignacion_otorgado_por")
+  userContext                    UserContext[]
+  accessLog                      AccessLog[]
+
+  @@map("app_user")
+}
+
+model Department {
+  id                    Int                     @id @default(autoincrement())
+  code                  String                  @unique @db.VarChar(40)
+  name                  String                  @db.VarChar(150)
+  active                Boolean                 @default(true)
+  user                  User[]
+  budgetSheet           BudgetSheet[]
+  category              Category[]
+  budgetLine            BudgetLine[]
+  resource              Resource[]
+  commentThread         CommentThread[]
+  reviewSubmission      ReviewSubmission[]
+  budgetSheetReview     BudgetSheetReview[]
+  systemObject          SystemObject[]
+  setting               Setting[]
+  accessGrantDepartment AccessGrantDepartment[]
+  accessLog             AccessLog[]
+  metricForecast        MetricForecast[]
+  metricTraining        MetricTraining[]
+  metricResourceValue   MetricResourceValue[]
+
+  @@map("department")
+}
+
+model FiscalYear {
+  id                    Int                     @id @default(autoincrement())
+  year                  Int                     @unique
+  referenceYear         Int                     @map("reference_year")
+  isOpen                Boolean                 @default(true) @map("is_open")
+  openedOn              DateTime?               @map("opened_on") @db.Date
+  closesOn              DateTime?               @map("closes_on") @db.Date
+  closedAt              DateTime?               @map("closed_at") @db.Timestamptz(6)
+  closedBy              Int?                    @map("closed_by")
+  closedBy2             User?                   @relation(fields: [closedBy], references: [id], onDelete: Restrict)
+  monthCalendar         MonthCalendar[]
+  budget                Budget[]
+  metricResourceValue   MetricResourceValue[]
+  posRate               PosRate[]
+  resourceQuantity      ResourceQuantity[]
+  monthlyDemand         MonthlyDemand[]
+  resourceFactor        ResourceFactor[]
+  resourceRecalculation ResourceRecalculation[]
+  commentThread         CommentThread[]
+  reviewSubmission      ReviewSubmission[]
+  setting               Setting[]
+  accessGrant           AccessGrant[]
+  userContext           UserContext[]
+  metricBudgetMonth     MetricBudgetMonth[]
+
+  @@map("fiscal_year")
+}
+
+model MonthCalendar {
+  id           Int        @id @default(autoincrement())
+  fiscalYearId Int        @map("fiscal_year_id")
+  month        Month
+  monthNumber  Int        @map("month_number") @db.SmallInt
+  days         Int        @db.SmallInt
+  holidays     Int        @default(0) @db.SmallInt
+  paymentDays  Int?       @map("payment_days") @db.SmallInt
+  fiscalYear   FiscalYear @relation(fields: [fiscalYearId], references: [id], onDelete: Restrict)
+
+  @@unique([fiscalYearId, month])
+  @@map("month_calendar")
+}
+
+model BudgetSheet {
+  id                  Int               @id @default(autoincrement())
+  departmentId        Int?              @map("department_id")
+  code                String            @unique @db.VarChar(40)
+  name                String            @db.VarChar(150)
+  nature              LineNature
+  sortOrder           Int               @map("sort_order") @db.SmallInt
+  appliesToCasino     Boolean           @default(true) @map("applies_to_casino")
+  appliesToRestaurant Boolean           @default(true) @map("applies_to_restaurant")
+  department          Department?       @relation(fields: [departmentId], references: [id], onDelete: Restrict)
+  budgetSheetNote     BudgetSheetNote[]
+  category            Category[]
+
+  @@map("budget_sheet")
+}
+
+model BudgetSheetNote {
+  id            Int         @id @default(autoincrement())
+  budgetSheetId Int         @map("budget_sheet_id")
+  type          String      @db.VarChar(20)
+  sortOrder     Int         @map("sort_order") @db.SmallInt
+  text          String
+  budgetSheet   BudgetSheet @relation(fields: [budgetSheetId], references: [id], onDelete: Restrict)
+
+  @@map("budget_sheet_note")
+}
+
+model Category {
+  id               Int          @id @default(autoincrement())
+  budgetSheetId    Int          @map("budget_sheet_id")
+  parentCategoryId Int?         @map("parent_category_id")
+  departmentId     Int?         @map("department_id")
+  ownerUserId      Int?         @map("owner_user_id")
+  code             String       @db.VarChar(60)
+  name             String       @db.VarChar(180)
+  sortOrder        Int          @map("sort_order") @db.SmallInt
+  isSubtotal       Boolean      @default(false) @map("is_subtotal")
+  budgetSheet      BudgetSheet  @relation(fields: [budgetSheetId], references: [id], onDelete: Restrict)
+  parentCategory   Category?    @relation("categoria_categoria_padre_id", fields: [parentCategoryId], references: [id], onDelete: Restrict)
+  department       Department?  @relation(fields: [departmentId], references: [id], onDelete: Restrict)
+  ownerUser        User?        @relation(fields: [ownerUserId], references: [id], onDelete: Restrict)
+  category         Category[]   @relation("categoria_categoria_padre_id")
+  lineItem         LineItem[]
+  fixedAsset       FixedAsset[]
+
+  @@unique([budgetSheetId, code])
+  @@map("category")
+}
+
+model LineItem {
+  id                 Int          @id @default(autoincrement())
+  categoryId         Int          @map("category_id")
+  code               String       @db.VarChar(80)
+  name               String       @db.VarChar(255)
+  nature             LineNature
+  frequency          Frequency    @default(monthly)
+  applicableMonths   Int[]        @map("applicable_months") @db.SmallInt
+  glAccount          String?      @map("gl_account") @db.VarChar(30)
+  fnbOnly            Boolean      @default(false) @map("fnb_only")
+  costCenterOnly     String?      @map("cost_center_only") @db.VarChar(20)
+  editable           Boolean      @default(true)
+  sortOrder          Int          @map("sort_order") @db.SmallInt
+  active             Boolean      @default(true)
+  // A que cuenta/subcuenta de metric_forecast/metric_training corresponde
+  // este concepto -- curado a mano desde la plataforma, NO se deriva de
+  // ningun Excel. department se toma del BudgetLine al consultar, no aqui.
+  forecastAccount    String?      @map("forecast_account") @db.VarChar(80)
+  forecastSubaccount String?      @map("forecast_subaccount") @db.VarChar(80)
+  category           Category     @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  budgetLine         BudgetLine[]
+  teamEvent          TeamEvent[]
+
+  @@unique([categoryId, code])
+  @@map("line_item")
+}
+
+model GlAccount {
+  id         Int          @id @default(autoincrement())
+  code       String       @unique @db.VarChar(20)
+  name       String       @db.VarChar(180)
+  active     Boolean      @default(true)
+  budgetLine BudgetLine[]
+  resource   Resource[]
+
+  @@map("gl_account")
+}
+
+model Resource {
+  id                    Int                     @id @default(autoincrement())
+  departmentId          Int                     @map("department_id")
+  glAccountId           Int?                    @map("gl_account_id")
+  type                  ResourceType
+  code                  String                  @unique @db.VarChar(60)
+  name                  String                  @db.VarChar(180)
+  unit                  String?                 @db.VarChar(20)
+  description           String?                 @db.VarChar(255)
+  active                Boolean                 @default(true)
+  createdAt             DateTime                @default(now()) @map("created_at") @db.Timestamptz(6)
+  department            Department              @relation(fields: [departmentId], references: [id], onDelete: Restrict)
+  glAccount             GlAccount?              @relation(fields: [glAccountId], references: [id], onDelete: Restrict)
+  budgetLine            BudgetLine[]
+  resourceValue         ResourceValue[]
+  resourceQuantity      ResourceQuantity[]
+  resourceFactor        ResourceFactor[]
+  resourceRecalculation ResourceRecalculation[]
+
+  @@map("resource")
+}
+
+model ResourceValue {
+  id           Int       @id @default(autoincrement())
+  resourceId   Int       @map("resource_id")
+  year         Int
+  component    String    @default("valor") @db.VarChar(60)
+  value        Decimal   @db.Decimal(18, 6)
+  isProjection Boolean   @default(false) @map("is_projection")
+  confirmedAt  DateTime? @map("confirmed_at") @db.Timestamptz(6)
+  confirmedBy  Int?      @map("confirmed_by")
+  resource     Resource  @relation(fields: [resourceId], references: [id], onDelete: Restrict)
+  confirmedBy2 User?     @relation(fields: [confirmedBy], references: [id], onDelete: Restrict)
+
+  @@unique([resourceId, year, component])
+  @@map("resource_value")
+}
+
+model ResourceQuantity {
+  id             Int            @id @default(autoincrement())
+  resourceId     Int            @map("resource_id")
+  businessUnitId Int            @map("business_unit_id")
+  fiscalYearId   Int            @map("fiscal_year_id")
+  quantitySource QuantitySource @default(fixed) @map("quantity_source")
+  quantity       Decimal?       @db.Decimal(18, 6)
+  base           String         @default("dia") @db.VarChar(20)
+  resource       Resource       @relation(fields: [resourceId], references: [id], onDelete: Restrict)
+  businessUnit   BusinessUnit   @relation(fields: [businessUnitId], references: [id], onDelete: Restrict)
+  fiscalYear     FiscalYear     @relation(fields: [fiscalYearId], references: [id], onDelete: Restrict)
+
+  @@unique([resourceId, businessUnitId, fiscalYearId])
+  @@map("resource_quantity")
+}
+
+model MonthlyDemand {
+  id             Int          @id @default(autoincrement())
+  businessUnitId Int          @map("business_unit_id")
+  fiscalYearId   Int          @map("fiscal_year_id")
+  month          Month
+  dau            Decimal      @db.Decimal(14, 4)
+  guestsServed   Decimal?     @map("guests_served") @db.Decimal(14, 4)
+  isEstimated    Boolean      @default(false) @map("is_estimated")
+  businessUnit   BusinessUnit @relation(fields: [businessUnitId], references: [id], onDelete: Restrict)
+  fiscalYear     FiscalYear   @relation(fields: [fiscalYearId], references: [id], onDelete: Restrict)
+
+  @@unique([businessUnitId, fiscalYearId, month])
+  @@map("monthly_demand")
+}
+
+model ResourceFactor {
+  id             Int           @id @default(autoincrement())
+  resourceId     Int           @map("resource_id")
+  businessUnitId Int?          @map("business_unit_id")
+  fiscalYearId   Int           @map("fiscal_year_id")
+  code           String        @db.VarChar(60)
+  value          Decimal       @db.Decimal(18, 6)
+  unit           String?       @db.VarChar(20)
+  source         String?       @db.VarChar(120)
+  resource       Resource      @relation(fields: [resourceId], references: [id], onDelete: Restrict)
+  businessUnit   BusinessUnit? @relation(fields: [businessUnitId], references: [id], onDelete: Restrict)
+  fiscalYear     FiscalYear    @relation(fields: [fiscalYearId], references: [id], onDelete: Restrict)
+
+  @@unique([resourceId, businessUnitId, fiscalYearId, code])
+  @@map("resource_factor")
+}
+
+model ResourceRecalculation {
+  id            BigInt     @id @default(autoincrement())
+  resourceId    Int        @map("resource_id")
+  fiscalYearId  Int        @map("fiscal_year_id")
+  triggeredBy   Int?       @map("triggered_by")
+  reason        String     @db.VarChar(60)
+  affectedLines Int        @default(0) @map("affected_lines")
+  notifiedCount Int        @default(0) @map("notified_count")
+  executedAt    DateTime   @default(now()) @map("executed_at") @db.Timestamptz(6)
+  resource      Resource   @relation(fields: [resourceId], references: [id], onDelete: Restrict)
+  fiscalYear    FiscalYear @relation(fields: [fiscalYearId], references: [id], onDelete: Restrict)
+  triggeredBy2  User?      @relation(fields: [triggeredBy], references: [id], onDelete: Restrict)
+
+  @@map("resource_recalculation")
+}
+
+model Budget {
+  id                        Int                         @id @default(autoincrement())
+  fiscalYearId              Int                         @map("fiscal_year_id")
+  businessUnitId            Int                         @map("business_unit_id")
+  costCenterId              Int                         @map("cost_center_id")
+  scenario                  Scenario                    @default(base)
+  version                   Int                         @default(1) @db.SmallInt
+  status                    BudgetStatus                @default(draft)
+  isCurrent                 Boolean                     @default(true) @map("is_current")
+  approvedBy                Int?                        @map("approved_by")
+  approvedAt                DateTime?                   @map("approved_at") @db.Timestamptz(6)
+  createdAt                 DateTime                    @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt                 DateTime                    @default(now()) @map("updated_at") @db.Timestamptz(6)
+  fiscalYear                FiscalYear                  @relation(fields: [fiscalYearId], references: [id], onDelete: Restrict)
+  businessUnit              BusinessUnit                @relation(fields: [businessUnitId], references: [id], onDelete: Restrict)
+  costCenter                CostCenter                  @relation(fields: [costCenterId], references: [id], onDelete: Restrict)
+  approvedBy2               User?                       @relation(fields: [approvedBy], references: [id], onDelete: Restrict)
+  budgetLine                BudgetLine[]
+  monthlyRevenue            MonthlyRevenue[]
+  payrollBenefit            PayrollBenefit[]
+  teamEvent                 TeamEvent[]
+  budgetedTrip              BudgetedTrip[]
+  licenseLine               LicenseLine[]
+  machineRoyalty            MachineRoyalty[]
+  tableRoyalty              TableRoyalty?
+  rawMaterialBlock          RawMaterialBlock[]
+  rawMaterialMonthlySummary RawMaterialMonthlySummary[]
+  posFeeLine                PosFeeLine[]
+  fixedAsset                FixedAsset[]
+  monthlyDepreciation       MonthlyDepreciation[]
+  monthlyTaxBase            MonthlyTaxBase[]
+  monthlyTax                MonthlyTax[]
+  monthlyProfitShare        MonthlyProfitShare[]
+  captureProgress           CaptureProgress?
+  reviewDecision            ReviewDecision[]
+  budgetSheetReview         BudgetSheetReview[]
+  budgetAuditLog            BudgetAuditLog[]
+  metricResourceSnapshot    MetricResourceSnapshot[]
+
+  @@unique([fiscalYearId, businessUnitId, costCenterId, scenario, version], map: "ux_budget_version")
+  @@index([fiscalYearId, isCurrent])
+  @@map("budget")
+}
+
+model BudgetLine {
+  id                       Int                    @id @default(autoincrement())
+  budgetId                 Int                    @map("budget_id")
+  lineItemId               Int                    @map("line_item_id")
+  departmentId             Int                    @map("department_id")
+  glAccountId              Int?                   @map("gl_account_id")
+  source                   LineSource             @default(resource)
+  resourceId               Int?                   @map("resource_id")
+  component                String?                @db.VarChar(60)
+  quantity                 Decimal?               @db.Decimal(18, 6)
+  quantityUnit             String?                @map("quantity_unit") @db.VarChar(30)
+  calculationNote          String?                @map("calculation_note") @db.VarChar(255)
+  frequency                Frequency?
+  referenceAmount          Decimal?               @map("reference_amount") @db.Decimal(18, 4)
+  factor                   Decimal?               @db.Decimal(9, 6)
+  factorText               String?                @map("factor_text") @db.VarChar(40)
+  totalAnnual              Decimal                @default(0) @map("total_annual") @db.Decimal(18, 4)
+  createdAt                DateTime               @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt                DateTime               @default(now()) @map("updated_at") @db.Timestamptz(6)
+  budget                   Budget                 @relation(fields: [budgetId], references: [id], onDelete: Restrict)
+  lineItem                 LineItem               @relation(fields: [lineItemId], references: [id], onDelete: Restrict)
+  resource                 Resource?              @relation(fields: [resourceId], references: [id], onDelete: Restrict)
+  glAccount                GlAccount?             @relation(fields: [glAccountId], references: [id], onDelete: Restrict)
+  department               Department             @relation(fields: [departmentId], references: [id], onDelete: Restrict)
+  budgetLineMonth          BudgetLineMonth[]
+  budgetLineLinkTargetLine BudgetLineLink[]       @relation("partida_enlace_partida_destino_id")
+  budgetLineLinkSourceLine BudgetLineLink[]       @relation("partida_enlace_partida_origen_id")
+  budgetLineAssignment     BudgetLineAssignment[]
+  monthlyActual            MonthlyActual[]
+
+  @@unique([budgetId, lineItemId])
+  @@index([resourceId])
+  @@map("budget_line")
+}
+
+model BudgetLineMonth {
+  id               Int        @id @default(autoincrement())
+  lineId           Int        @map("line_id")
+  month            Month
+  amount           Decimal    @default(0) @db.Decimal(18, 4)
+  calculatedAmount Decimal?   @map("calculated_amount") @db.Decimal(18, 4)
+  isOverride       Boolean    @default(false) @map("is_override")
+  overrideReason   String?    @map("override_reason") @db.VarChar(255)
+  calculatedAt     DateTime?  @map("calculated_at") @db.Timestamptz(6)
+  /// Que opcion se eligio para el mes: "predicted" | "lower" | "upper"
+  /// (bandas del modelo), "y2025" (cierre de ese año) o "manual" (capturado
+  /// a mano). Null en lo capturado antes de que existiera la columna.
+  variant          String?    @db.VarChar(20)
+  line             BudgetLine @relation(fields: [lineId], references: [id], onDelete: Restrict)
+
+  @@unique([lineId, month])
+  @@index([month])
+  @@map("budget_line_month")
+}
+
+model BudgetLineLink {
+  id           Int        @id @default(autoincrement())
+  targetLineId Int        @map("target_line_id")
+  sourceLineId Int        @map("source_line_id")
+  ratio        Decimal    @default(1) @db.Decimal(9, 6)
+  description  String?    @db.VarChar(255)
+  targetLine   BudgetLine @relation("partida_enlace_partida_destino_id", fields: [targetLineId], references: [id], onDelete: Restrict)
+  sourceLine   BudgetLine @relation("partida_enlace_partida_origen_id", fields: [sourceLineId], references: [id], onDelete: Restrict)
+
+  @@unique([targetLineId, sourceLineId])
+  @@map("budget_line_link")
+}
+
+model MonthlyRevenue {
+  id               Int           @id @default(autoincrement())
+  budgetId         Int           @map("budget_id")
+  revenueStream    RevenueStream @map("revenue_stream")
+  month            Month
+  amount           Decimal       @default(0) @db.Decimal(18, 4)
+  gamingRevenuePct Decimal?      @map("gaming_revenue_pct") @db.Decimal(9, 6)
+  budget           Budget        @relation(fields: [budgetId], references: [id], onDelete: Restrict)
+
+  @@unique([budgetId, revenueStream, month])
+  @@map("monthly_revenue")
+}
+
+model PayrollBenefit {
+  id                Int     @id @default(autoincrement())
+  budgetId          Int     @map("budget_id")
+  name              String  @db.VarChar(120)
+  beneficiaries     Int     @default(0)
+  unitAmount        Decimal @default(0) @map("unit_amount") @db.Decimal(14, 4)
+  includedInPayroll Boolean @default(false) @map("included_in_payroll")
+  budget            Budget  @relation(fields: [budgetId], references: [id], onDelete: Restrict)
+
+  @@map("payroll_benefit")
+}
+
+model TeamEvent {
+  id             Int       @id @default(autoincrement())
+  budgetId       Int       @map("budget_id")
+  lineItemId     Int?      @map("line_item_id")
+  name           String    @db.VarChar(180)
+  month          Month
+  guests         Int?
+  budgetPerGuest Decimal?  @map("budget_per_guest") @db.Decimal(14, 4)
+  flatBudget     Decimal?  @map("flat_budget") @db.Decimal(14, 4)
+  factor         Decimal?  @default(0.05) @db.Decimal(9, 6)
+  budget         Budget    @relation(fields: [budgetId], references: [id], onDelete: Restrict)
+  lineItem       LineItem? @relation(fields: [lineItemId], references: [id], onDelete: Restrict)
+
+  @@map("team_event")
+}
+
+model BudgetedTrip {
+  id          Int      @id @default(autoincrement())
+  budgetId    Int      @map("budget_id")
+  destination String   @db.VarChar(120)
+  month       Month
+  guests      Int      @default(0)
+  unitCost    Decimal  @map("unit_cost") @db.Decimal(14, 4)
+  factor      Decimal? @default(0.05) @db.Decimal(9, 6)
+  budget      Budget   @relation(fields: [budgetId], references: [id], onDelete: Restrict)
+
+  @@index([budgetId, destination, month])
+  @@map("budgeted_trip")
+}
+
+model License {
+  id            Int           @id @default(autoincrement())
+  code          String        @unique @db.VarChar(60)
+  name          String        @db.VarChar(150)
+  vendor        String?       @db.VarChar(150)
+  area          String?       @db.VarChar(80)
+  type          LicenseType
+  currency      String        @default("MXN") @db.Char(3)
+  dailyUnitCost Decimal?      @map("daily_unit_cost") @db.Decimal(14, 6)
+  active        Boolean       @default(true)
+  licenseLine   LicenseLine[]
+
+  @@map("license")
+}
+
+model LicenseLine {
+  id            Int      @id @default(autoincrement())
+  budgetId      Int      @map("budget_id")
+  licenseId     Int      @map("license_id")
+  units         Int?
+  referenceCost Decimal? @map("reference_cost") @db.Decimal(18, 4)
+  factor        Decimal? @default(0.05) @db.Decimal(9, 6)
+  exchangeRate  Decimal? @map("exchange_rate") @db.Decimal(10, 4)
+  budget        Budget   @relation(fields: [budgetId], references: [id], onDelete: Restrict)
+  license       License  @relation(fields: [licenseId], references: [id], onDelete: Restrict)
+
+  @@unique([budgetId, licenseId])
+  @@map("license_line")
+}
+
+model MachineRoyalty {
+  id                     Int              @id @default(autoincrement())
+  budgetId               Int              @map("budget_id")
+  ownership              MachineOwnership
+  machineCount           Int              @default(0) @map("machine_count")
+  dailyRevenuePerMachine Decimal?         @map("daily_revenue_per_machine") @db.Decimal(14, 4)
+  avgNetwinPct           Decimal?         @map("avg_netwin_pct") @db.Decimal(9, 6)
+  royaltyCostPct         Decimal?         @map("royalty_cost_pct") @db.Decimal(9, 6)
+  budget                 Budget           @relation(fields: [budgetId], references: [id], onDelete: Restrict)
+
+  @@unique([budgetId, ownership])
+  @@map("machine_royalty")
+}
+
+model TableRoyalty {
+  id             Int     @id @default(autoincrement())
+  budgetId       Int     @unique @map("budget_id")
+  tableCount     Int     @default(0) @map("table_count")
+  monthlyFlatFee Decimal @default(0) @map("monthly_flat_fee") @db.Decimal(14, 4)
+  budget         Budget  @relation(fields: [budgetId], references: [id], onDelete: Restrict)
+
+  @@map("table_royalty")
+}
+
+model RawMaterialBlock {
+  id                    Int                     @id @default(autoincrement())
+  budgetId              Int                     @map("budget_id")
+  block                 SupplyBlockType
+  targetRawMaterialPct  Decimal                 @map("target_raw_material_pct") @db.Decimal(9, 6)
+  budget                Budget                  @relation(fields: [budgetId], references: [id], onDelete: Restrict)
+  rawMaterialBlockMonth RawMaterialBlockMonth[]
+
+  @@unique([budgetId, block])
+  @@map("raw_material_block")
+}
+
+model RawMaterialBlockMonth {
+  id                 Int              @id @default(autoincrement())
+  blockId            Int              @map("block_id")
+  month              Month
+  baseRevenue        Decimal          @default(0) @map("base_revenue") @db.Decimal(18, 4)
+  cigaretteDeduction Decimal          @default(0) @map("cigarette_deduction") @db.Decimal(18, 4)
+  beverageDeduction  Decimal          @default(0) @map("beverage_deduction") @db.Decimal(18, 4)
+  promoDeduction     Decimal          @default(0) @map("promo_deduction") @db.Decimal(18, 4)
+  budgetedAmount     Decimal          @default(0) @map("budgeted_amount") @db.Decimal(18, 4)
+  block              RawMaterialBlock @relation(fields: [blockId], references: [id], onDelete: Restrict)
+
+  @@unique([blockId, month])
+  @@map("raw_material_block_month")
+}
+
+model RawMaterialMonthlySummary {
+  id                            Int      @id @default(autoincrement())
+  budgetId                      Int      @map("budget_id")
+  month                         Month
+  fnbSales                      Decimal  @default(0) @map("fnb_sales") @db.Decimal(18, 4)
+  cigaretteCost                 Decimal  @default(0) @map("cigarette_cost") @db.Decimal(18, 4)
+  sodaCost                      Decimal  @default(0) @map("soda_cost") @db.Decimal(18, 4)
+  supplyCost                    Decimal  @default(0) @map("supply_cost") @db.Decimal(18, 4)
+  rawMaterialTotal              Decimal  @default(0) @map("raw_material_total") @db.Decimal(18, 4)
+  rawMaterialToSalesPct         Decimal? @map("raw_material_to_sales_pct") @db.Decimal(9, 6)
+  rawMaterialToGamingRevenuePct Decimal? @map("raw_material_to_gaming_revenue_pct") @db.Decimal(9, 6)
+  budget                        Budget   @relation(fields: [budgetId], references: [id], onDelete: Restrict)
+
+  @@unique([budgetId, month])
+  @@map("raw_material_monthly_summary")
+}
+
+model BusinessUnitMonthlyHistory {
+  id                 Int          @id @default(autoincrement())
+  businessUnitId     Int          @map("business_unit_id")
+  year               Int
+  month              Month
+  isEstimated        Boolean      @default(false) @map("is_estimated")
+  gamingRevenue      Decimal?     @map("gaming_revenue") @db.Decimal(18, 4)
+  fnbRevenue         Decimal?     @map("fnb_revenue") @db.Decimal(18, 4)
+  fnbThirdPartySales Decimal?     @map("fnb_third_party_sales") @db.Decimal(18, 4)
+  rawMaterialTotal   Decimal?     @map("raw_material_total") @db.Decimal(18, 4)
+  businessUnit       BusinessUnit @relation(fields: [businessUnitId], references: [id], onDelete: Restrict)
+
+  @@unique([businessUnitId, year, month])
+  @@map("business_unit_monthly_history")
+}
+
+model SupplyHistory {
+  id             Int               @id @default(autoincrement())
+  businessUnitId Int               @map("business_unit_id")
+  type           SupplyHistoryType
+  year           Int
+  month          Month
+  quantity       Decimal?          @db.Decimal(18, 4)
+  amount         Decimal?          @db.Decimal(18, 4)
+  businessUnit   BusinessUnit      @relation(fields: [businessUnitId], references: [id], onDelete: Restrict)
+
+  @@unique([businessUnitId, type, year, month])
+  @@map("supply_history")
+}
+
+model PosProvider {
+  id         Int          @id @default(autoincrement())
+  code       String       @unique @db.VarChar(30)
+  name       String       @db.VarChar(120)
+  active     Boolean      @default(true)
+  posRate    PosRate[]
+  posFeeLine PosFeeLine[]
+
+  @@map("pos_provider")
+}
+
+model PosRate {
+  id           Int         @id @default(autoincrement())
+  vendorTpvId  Int         @map("vendor_tpv_id")
+  fiscalYearId Int         @map("fiscal_year_id")
+  cardType     CardType    @map("card_type")
+  rateNotVat   Decimal     @map("rate_not_vat") @db.Decimal(9, 6)
+  vendorTpv    PosProvider @relation(fields: [vendorTpvId], references: [id], onDelete: Restrict)
+  fiscalYear   FiscalYear  @relation(fields: [fiscalYearId], references: [id], onDelete: Restrict)
+
+  @@unique([vendorTpvId, fiscalYearId, cardType])
+  @@map("pos_rate")
+}
+
+model PosFeeLine {
+  id                  Int         @id @default(autoincrement())
+  budgetId            Int         @map("budget_id")
+  vendorTpvId         Int         @map("vendor_tpv_id")
+  cardSalesPct        Decimal     @map("card_sales_pct") @db.Decimal(9, 6)
+  appliedRateNotVat   Decimal     @map("applied_rate_not_vat") @db.Decimal(9, 6)
+  passedToCustomerPct Decimal?    @default(0) @map("passed_to_customer_pct") @db.Decimal(9, 6)
+  runnerPct           Decimal?    @default(0.2) @map("runner_pct") @db.Decimal(9, 6)
+  budget              Budget      @relation(fields: [budgetId], references: [id], onDelete: Restrict)
+  vendorTpv           PosProvider @relation(fields: [vendorTpvId], references: [id], onDelete: Restrict)
+
+  @@unique([budgetId, vendorTpvId])
+  @@map("pos_fee_line")
+}
+
+model FixedAsset {
+  id                  Int                   @id @default(autoincrement())
+  budgetId            Int                   @map("budget_id")
+  categoryId          Int?                  @map("category_id")
+  description         String                @db.VarChar(200)
+  purchaseMonth       Month                 @map("purchase_month")
+  quantity            Int                   @default(1)
+  unitCost            Decimal               @default(0) @map("unit_cost") @db.Decimal(18, 4)
+  usefulLifeMonths    Int?                  @map("useful_life_months") @db.SmallInt
+  subjectToFunding    Boolean               @default(true) @map("subject_to_funding")
+  budget              Budget                @relation(fields: [budgetId], references: [id], onDelete: Restrict)
+  category            Category?             @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  monthlyDepreciation MonthlyDepreciation[]
+
+  @@map("fixed_asset")
+}
+
+model MonthlyDepreciation {
+  id           Int         @id @default(autoincrement())
+  budgetId     Int         @map("budget_id")
+  fixedAssetId Int?        @map("fixed_asset_id")
+  month        Month
+  amount       Decimal     @default(0) @db.Decimal(18, 4)
+  budget       Budget      @relation(fields: [budgetId], references: [id], onDelete: Restrict)
+  fixedAsset   FixedAsset? @relation(fields: [fixedAssetId], references: [id], onDelete: Restrict)
+
+  @@index([budgetId, month])
+  @@map("monthly_depreciation")
+}
+
+model MonthlyTaxBase {
+  id             Int      @id @default(autoincrement())
+  budgetId       Int      @map("budget_id")
+  taxLine        TaxLine  @map("tax_line")
+  month          Month
+  netwin         Decimal  @default(0) @db.Decimal(18, 4)
+  netwinReported Decimal  @default(0) @map("netwin_reported") @db.Decimal(18, 4)
+  sales          Decimal  @default(0) @db.Decimal(18, 4)
+  returns        Decimal  @default(0) @db.Decimal(18, 4)
+  prizes         Decimal  @default(0) @db.Decimal(18, 4)
+  nonCashPrizes  Decimal  @default(0) @map("non_cash_prizes") @db.Decimal(18, 4)
+  taxableRevenue Decimal? @map("taxable_revenue") @db.Decimal(18, 4)
+  budget         Budget   @relation(fields: [budgetId], references: [id], onDelete: Restrict)
+
+  @@unique([budgetId, taxLine, month])
+  @@map("monthly_tax_base")
+}
+
+model TaxType {
+  id              Int          @id @default(autoincrement())
+  code            String       @unique @db.VarChar(40)
+  name            String       @db.VarChar(150)
+  area            String       @db.VarChar(20)
+  calculationBase String       @map("calculation_base") @db.VarChar(60)
+  rate            Decimal?     @db.Decimal(9, 6)
+  monthlyTax      MonthlyTax[]
+
+  @@map("tax_type")
+}
+
+model MonthlyTax {
+  id        Int     @id @default(autoincrement())
+  budgetId  Int     @map("budget_id")
+  taxTypeId Int     @map("tax_type_id")
+  taxLine   TaxLine @map("tax_line")
+  month     Month
+  base      Decimal @default(0) @db.Decimal(18, 4)
+  amount    Decimal @default(0) @db.Decimal(18, 4)
+  budget    Budget  @relation(fields: [budgetId], references: [id], onDelete: Restrict)
+  taxType   TaxType @relation(fields: [taxTypeId], references: [id], onDelete: Restrict)
+
+  @@unique([budgetId, taxTypeId, taxLine, month])
+  @@map("monthly_tax")
+}
+
+model MonthlyProfitShare {
+  id                Int      @id @default(autoincrement())
+  budgetId          Int      @map("budget_id")
+  month             Month
+  netwin            Decimal  @default(0) @db.Decimal(18, 4)
+  netwinReported    Decimal  @default(0) @map("netwin_reported") @db.Decimal(18, 4)
+  taxes             Decimal  @default(0) @db.Decimal(18, 4)
+  grossNetwin       Decimal  @default(0) @map("gross_netwin") @db.Decimal(18, 4)
+  profitSharePct    Decimal? @map("profit_share_pct") @db.Decimal(9, 6)
+  profitShareAmount Decimal  @default(0) @map("profit_share_amount") @db.Decimal(18, 4)
+  budget            Budget   @relation(fields: [budgetId], references: [id], onDelete: Restrict)
+
+  @@unique([budgetId, month])
+  @@map("monthly_profit_share")
+}
+
+model MonthlyActual {
+  id               Int        @id @default(autoincrement())
+  lineId           Int        @map("line_id")
+  month            Month
+  committedAmount  Decimal    @default(0) @map("committed_amount") @db.Decimal(18, 4)
+  paidAmount       Decimal    @default(0) @map("paid_amount") @db.Decimal(18, 4)
+  purchaseOrderRef String?    @map("purchase_order_ref") @db.VarChar(60)
+  updatedAt        DateTime   @default(now()) @map("updated_at") @db.Timestamptz(6)
+  line             BudgetLine @relation(fields: [lineId], references: [id], onDelete: Restrict)
+
+  @@unique([lineId, month])
+  @@map("monthly_actual")
+}
+
+model BudgetAuditLog {
+  id       Int      @id @default(autoincrement())
+  budgetId Int      @map("budget_id")
+  userId   Int?     @map("user_id")
+  action   String   @db.VarChar(40)
+  details  Json?    @db.JsonB
+  loggedAt DateTime @default(now()) @map("logged_at") @db.Timestamptz(6)
+  budget   Budget   @relation(fields: [budgetId], references: [id], onDelete: Restrict)
+  user     User?    @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  @@index([budgetId, loggedAt])
+  @@map("budget_audit_log")
+}
+
+model BudgetLineAssignment {
+  id          Int        @id @default(autoincrement())
+  lineId      Int        @map("line_id")
+  userId      Int        @map("user_id")
+  assignedBy  Int        @map("assigned_by")
+  finished    Boolean    @default(false)
+  finishedAt  DateTime?  @map("finished_at") @db.Timestamptz(6)
+  assignedAt  DateTime   @default(now()) @map("assigned_at") @db.Timestamptz(6)
+  line        BudgetLine @relation(fields: [lineId], references: [id], onDelete: Restrict)
+  user        User       @relation("partida_asignacion_usuario_id", fields: [userId], references: [id], onDelete: Restrict)
+  assignedBy2 User       @relation("partida_asignacion_asignado_por", fields: [assignedBy], references: [id], onDelete: Restrict)
+
+  @@unique([lineId], map: "ux_un_responsable_per_line")
+  @@index([userId])
+  @@map("budget_line_assignment")
+}
+
+model CommentThread {
+  id             Int           @id @default(autoincrement())
+  systemObjectId Int           @map("system_object_id")
+  recordId       String        @map("record_id") @db.VarChar(255)
+  field          String?       @db.VarChar(60)
+  status         ThreadStatus  @default(open)
+  blocking       Boolean       @default(false)
+  departmentId   Int?          @map("department_id")
+  businessUnitId Int?          @map("business_unit_id")
+  fiscalYearId   Int?          @map("fiscal_year_id")
+  openedBy       Int           @map("opened_by")
+  resolvedBy     Int?          @map("resolved_by")
+  resolvedAt     DateTime?     @map("resolved_at") @db.Timestamptz(6)
+  createdAt      DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+  object         SystemObject  @relation(fields: [systemObjectId], references: [id], onDelete: Restrict)
+  department     Department?   @relation(fields: [departmentId], references: [id], onDelete: Restrict)
+  businessUnit   BusinessUnit? @relation(fields: [businessUnitId], references: [id], onDelete: Restrict)
+  fiscalYear     FiscalYear?   @relation(fields: [fiscalYearId], references: [id], onDelete: Restrict)
+  openedBy2      User          @relation("conversacion_abierta_por", fields: [openedBy], references: [id], onDelete: Restrict)
+  resolvedBy2    User?         @relation("conversacion_resuelta_por", fields: [resolvedBy], references: [id], onDelete: Restrict)
+  message        Message[]
+
+  @@index([systemObjectId, recordId, field], map: "ix_thread_ancla")
+  @@index([status, blocking])
+  @@index([departmentId, businessUnitId, fiscalYearId], map: "ix_thread_scope")
+  @@map("comment_thread")
+}
+
+model Message {
+  id              Int           @id @default(autoincrement())
+  threadId        Int           @map("thread_id")
+  parentMessageId Int?          @map("parent_message_id")
+  userId          Int           @map("user_id")
+  text            String
+  editedAt        DateTime?     @map("edited_at") @db.Timestamptz(6)
+  deletedAt       DateTime?     @map("deleted_at") @db.Timestamptz(6)
+  createdAt       DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+  thread          CommentThread @relation(fields: [threadId], references: [id], onDelete: Restrict)
+  parentMessage   Message?      @relation("mensaje_mensaje_padre_id", fields: [parentMessageId], references: [id], onDelete: Restrict)
+  user            User          @relation(fields: [userId], references: [id], onDelete: Restrict)
+  message         Message[]     @relation("mensaje_mensaje_padre_id")
+  attachment      Attachment[]
+
+  @@index([threadId, createdAt])
+  @@index([parentMessageId])
+  @@map("message")
+}
+
+model Attachment {
+  id          Int              @id @default(autoincrement())
+  messageId   Int              @map("message_id")
+  bucket      String           @db.VarChar(80)
+  objectKey   String           @map("object_key") @db.VarChar(512)
+  fileName    String           @map("file_name") @db.VarChar(255)
+  mime        String?          @db.VarChar(120)
+  sizeBytes   BigInt?          @map("size_bytes")
+  checksum    String?          @db.VarChar(128)
+  status      AttachmentStatus @default(pending)
+  uploadedBy  Int              @map("uploaded_by")
+  uploadedAt  DateTime         @default(now()) @map("uploaded_at") @db.Timestamptz(6)
+  deletedAt   DateTime?        @map("deleted_at") @db.Timestamptz(6)
+  message     Message          @relation(fields: [messageId], references: [id], onDelete: Restrict)
+  uploadedBy2 User             @relation(fields: [uploadedBy], references: [id], onDelete: Restrict)
+
+  @@unique([bucket, objectKey])
+  @@index([messageId])
+  @@index([status], map: "ix_attachment_pendientes")
+  @@map("attachment")
+}
+
+model CaptureProgress {
+  id              Int           @id @default(autoincrement())
+  budgetId        Int           @unique @map("budget_id")
+  status          CaptureStatus @default(notStarted)
+  totalLines      Int           @default(0) @map("total_lines")
+  capturedLines   Int           @default(0) @map("captured_lines")
+  openThreads     Int           @default(0) @map("open_threads")
+  blockingThreads Int           @default(0) @map("blocking_threads")
+  updatedAt       DateTime      @default(now()) @map("updated_at") @db.Timestamptz(6)
+  budget          Budget        @relation(fields: [budgetId], references: [id], onDelete: Restrict)
+
+  @@map("capture_progress")
+}
+
+model ReviewSubmission {
+  id              Int              @id @default(autoincrement())
+  fiscalYearId    Int              @map("fiscal_year_id")
+  departmentId    Int              @map("department_id")
+  version         Int              @default(1) @db.SmallInt
+  submittedBy     Int              @map("submitted_by")
+  submittedAt     DateTime         @default(now()) @map("submitted_at") @db.Timestamptz(6)
+  submittedUnits  Int              @map("submitted_units")
+  incompleteUnits Int              @default(0) @map("incomplete_units")
+  note            String?
+  fiscalYear      FiscalYear       @relation(fields: [fiscalYearId], references: [id], onDelete: Restrict)
+  department      Department       @relation(fields: [departmentId], references: [id], onDelete: Restrict)
+  submittedBy2    User             @relation(fields: [submittedBy], references: [id], onDelete: Restrict)
+  reviewDecision  ReviewDecision[]
+  budgetSheetReview BudgetSheetReview[]
+
+  @@unique([fiscalYearId, departmentId, version])
+  @@map("review_submission")
+}
+
+model ReviewDecision {
+  id                 Int              @id @default(autoincrement())
+  reviewSubmissionId Int              @map("review_submission_id")
+  budgetId           Int              @map("budget_id")
+  result             ReviewOutcome
+  decidedBy          Int              @map("decided_by")
+  decidedAt          DateTime         @default(now()) @map("decided_at") @db.Timestamptz(6)
+  comment            String?
+  reviewSubmission   ReviewSubmission @relation(fields: [reviewSubmissionId], references: [id], onDelete: Restrict)
+  budget             Budget           @relation(fields: [budgetId], references: [id], onDelete: Restrict)
+  decidedBy2         User             @relation(fields: [decidedBy], references: [id], onDelete: Restrict)
+
+  @@unique([reviewSubmissionId, budgetId])
+  @@map("review_decision")
+}
+
+/// Estado de la hoja de un departamento en un casino. Budget agrupa todo el
+/// casino, por lo que su status no puede cerrar la captura de una sola hoja.
+model BudgetSheetReview {
+  budgetId           Int          @map("budget_id")
+  departmentId       Int          @map("department_id")
+  reviewSubmissionId Int          @map("review_submission_id")
+  status             BudgetStatus @default(inReview)
+  updatedAt          DateTime     @default(now()) @map("updated_at") @db.Timestamptz(6)
+  budget             Budget       @relation(fields: [budgetId], references: [id], onDelete: Restrict)
+  department         Department   @relation(fields: [departmentId], references: [id], onDelete: Restrict)
+  reviewSubmission   ReviewSubmission @relation(fields: [reviewSubmissionId], references: [id], onDelete: Restrict)
+
+  @@id([budgetId, departmentId])
+  @@index([reviewSubmissionId])
+  @@map("budget_sheet_review")
+}
+
+model Role {
+  id             Int              @id @default(autoincrement())
+  code           String           @unique @db.VarChar(40)
+  name           String           @db.VarChar(120)
+  description    String?          @db.VarChar(255)
+  bypassesScope  Boolean          @default(false) @map("bypasses_scope")
+  active         Boolean          @default(true)
+  rolePermission RolePermission[]
+  setting        Setting[]
+  accessGrant    AccessGrant[]
+
+  @@map("app_role")
+}
+
+model AccessGrant {
+  id                      Int                       @id @default(autoincrement())
+  userId                  Int                       @map("user_id")
+  roleId                  Int                       @map("role_id")
+  departmentScope         ScopeMode                 @default(selected) @map("department_scope")
+  businessUnitScope       ScopeMode                 @default(all) @map("business_unit_scope")
+  costCenterScope         ScopeMode                 @default(all) @map("cost_center_scope")
+  fiscalYearId            Int?                      @map("fiscal_year_id")
+  validFrom               DateTime                  @default(dbgenerated("CURRENT_DATE")) @map("valid_from") @db.Date
+  validUntil              DateTime?                 @map("valid_until") @db.Date
+  grantedBy               Int?                      @map("granted_by")
+  createdAt               DateTime                  @default(now()) @map("created_at") @db.Timestamptz(6)
+  user                    User                      @relation("asignacion_usuario_id", fields: [userId], references: [id], onDelete: Restrict)
+  role                    Role                      @relation(fields: [roleId], references: [id], onDelete: Restrict)
+  fiscalYear              FiscalYear?               @relation(fields: [fiscalYearId], references: [id], onDelete: Restrict)
+  grantedBy2              User?                     @relation("asignacion_otorgado_por", fields: [grantedBy], references: [id], onDelete: Restrict)
+  accessGrantPermission   AccessGrantPermission[]
+  accessGrantDepartment   AccessGrantDepartment[]
+  accessGrantBusinessUnit AccessGrantBusinessUnit[]
+  accessGrantCostCenter   AccessGrantCostCenter[]
+
+  @@unique([userId, roleId, fiscalYearId], map: "ux_grant_vigente")
+  @@index([userId])
+  @@map("access_grant")
+}
+
+model AccessGrantDepartment {
+  grantId      Int         @map("grant_id")
+  departmentId Int         @map("department_id")
+  grant        AccessGrant @relation(fields: [grantId], references: [id], onDelete: Restrict)
+  department   Department  @relation(fields: [departmentId], references: [id], onDelete: Restrict)
+
+  @@id([grantId, departmentId])
+  @@map("access_grant_department")
+}
+
+model AccessGrantBusinessUnit {
+  grantId        Int          @map("grant_id")
+  businessUnitId Int          @map("business_unit_id")
+  grant          AccessGrant  @relation(fields: [grantId], references: [id], onDelete: Restrict)
+  businessUnit   BusinessUnit @relation(fields: [businessUnitId], references: [id], onDelete: Restrict)
+
+  @@id([grantId, businessUnitId])
+  @@map("access_grant_business_unit")
+}
+
+model AccessGrantCostCenter {
+  grantId      Int         @map("grant_id")
+  costCenterId Int         @map("cost_center_id")
+  grant        AccessGrant @relation(fields: [grantId], references: [id], onDelete: Restrict)
+  costCenter   CostCenter  @relation(fields: [costCenterId], references: [id], onDelete: Restrict)
+
+  @@id([grantId, costCenterId])
+  @@map("access_grant_cost_center")
+}
+
+model UserContext {
+  userId         Int          @id @map("user_id")
+  businessUnitId Int          @map("business_unit_id")
+  fiscalYearId   Int          @map("fiscal_year_id")
+  costCenterId   Int?         @map("cost_center_id")
+  updatedAt      DateTime     @default(now()) @map("updated_at") @db.Timestamptz(6)
+  user           User         @relation(fields: [userId], references: [id], onDelete: Restrict)
+  businessUnit   BusinessUnit @relation(fields: [businessUnitId], references: [id], onDelete: Restrict)
+  fiscalYear     FiscalYear   @relation(fields: [fiscalYearId], references: [id], onDelete: Restrict)
+  costCenter     CostCenter?  @relation(fields: [costCenterId], references: [id], onDelete: Restrict)
+
+  @@map("user_context")
+}
+
+model AccessLog {
+  id             BigInt        @id @default(autoincrement())
+  userId         Int           @map("user_id")
+  result         AccessResult
+  object         String        @db.VarChar(80)
+  businessUnitId Int?          @map("business_unit_id")
+  departmentId   Int?          @map("department_id")
+  ip             String?       @db.Inet
+  userAgent      String?       @map("user_agent") @db.VarChar(255)
+  loggedAt       DateTime      @default(now()) @map("logged_at") @db.Timestamptz(6)
+  user           User          @relation(fields: [userId], references: [id], onDelete: Restrict)
+  businessUnit   BusinessUnit? @relation(fields: [businessUnitId], references: [id], onDelete: Restrict)
+  department     Department?   @relation(fields: [departmentId], references: [id], onDelete: Restrict)
+
+  @@index([userId, loggedAt])
+  @@index([result, loggedAt], map: "ix_log_access_denegados")
+  @@map("access_log")
+}
+
+model SystemObject {
+  id               Int              @id @default(autoincrement())
+  code             String           @unique @db.VarChar(80)
+  name             String           @db.VarChar(150)
+  type             SystemObjectType @default(table)
+  module           String           @db.VarChar(40)
+  departmentId     Int?             @map("department_id")
+  departmentPath   String?          @map("department_path") @db.VarChar(255)
+  businessUnitPath String?          @map("business_unit_path") @db.VarChar(255)
+  commentable      Boolean          @default(true)
+  auditReads       Boolean          @default(false) @map("audit_reads")
+  sensitive        Boolean          @default(false)
+  active           Boolean          @default(true)
+  department       Department?      @relation(fields: [departmentId], references: [id], onDelete: Restrict)
+  commentThread    CommentThread[]
+  permission       Permission[]
+  setting          Setting[]
+
+  @@map("system_object")
+}
+
+model Permission {
+  id                    Int                     @id @default(autoincrement())
+  systemObjectId        Int                     @map("system_object_id")
+  action                Action
+  field                 String?                 @db.VarChar(60)
+  code                  String                  @unique @db.VarChar(120)
+  description           String?                 @db.VarChar(255)
+  object                SystemObject            @relation(fields: [systemObjectId], references: [id], onDelete: Restrict)
+  rolePermission        RolePermission[]
+  accessGrantPermission AccessGrantPermission[]
+
+  @@unique([systemObjectId, action, field])
+  @@map("permission")
+}
+
+model RolePermission {
+  roleId       Int              @map("role_id")
+  permissionId Int              @map("permission_id")
+  effect       PermissionEffect @default(allow)
+  role         Role             @relation(fields: [roleId], references: [id], onDelete: Restrict)
+  permission   Permission       @relation(fields: [permissionId], references: [id], onDelete: Restrict)
+
+  @@id([roleId, permissionId])
+  @@map("role_permission")
+}
+
+model AccessGrantPermission {
+  grantId      Int              @map("grant_id")
+  permissionId Int              @map("permission_id")
+  effect       PermissionEffect
+  reason       String?          @db.VarChar(255)
+  grant        AccessGrant      @relation(fields: [grantId], references: [id], onDelete: Restrict)
+  permission   Permission       @relation(fields: [permissionId], references: [id], onDelete: Restrict)
+
+  @@id([grantId, permissionId])
+  @@map("access_grant_permission")
+}
+
+model Setting {
+  id               Int           @id @default(autoincrement())
+  systemObjectId   Int?          @map("system_object_id")
+  code             String        @db.VarChar(80)
+  name             String        @db.VarChar(180)
+  area             SettingScope  @default(global)
+  dataType         String        @default("numeric") @map("data_type") @db.VarChar(20)
+  value            String
+  unit             String?       @db.VarChar(20)
+  fiscalYearId     Int?          @map("fiscal_year_id")
+  businessUnitId   Int?          @map("business_unit_id")
+  departmentId     Int?          @map("department_id")
+  costCenterId     Int?          @map("cost_center_id")
+  userId           Int?          @map("user_id")
+  editableByRoleId Int?          @map("editable_by_role_id")
+  validFrom        DateTime?     @map("valid_from") @db.Date
+  validUntil       DateTime?     @map("valid_until") @db.Date
+  updatedAt        DateTime      @default(now()) @map("updated_at") @db.Timestamptz(6)
+  object           SystemObject? @relation(fields: [systemObjectId], references: [id], onDelete: Restrict)
+  fiscalYear       FiscalYear?   @relation(fields: [fiscalYearId], references: [id], onDelete: Restrict)
+  businessUnit     BusinessUnit? @relation(fields: [businessUnitId], references: [id], onDelete: Restrict)
+  department       Department?   @relation(fields: [departmentId], references: [id], onDelete: Restrict)
+  costCenter       CostCenter?   @relation(fields: [costCenterId], references: [id], onDelete: Restrict)
+  user             User?         @relation(fields: [userId], references: [id], onDelete: Restrict)
+  editableByRole   Role?         @relation(fields: [editableByRoleId], references: [id], onDelete: Restrict)
+
+  @@unique([code, area, fiscalYearId, businessUnitId, departmentId], map: "ux_setting_per_scope")
+  @@map("setting")
+}
+
+model AuthUser {
+  id            String   @id @db.VarChar(64)
+  name          String   @db.VarChar(255)
+  email         String   @unique @db.VarChar(255)
+  emailVerified Boolean  @default(false) @map("email_verified")
+  image         String?
+  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt     DateTime @default(now()) @map("updated_at") @db.Timestamptz(6)
+
+  // Columnas del plugin admin. `role` es de Better Auth ("user" / "admin") y no
+  // tiene relacion con el modelo Role del negocio: los permisos salen de AccessGrant.
+  role       String?   @db.VarChar(40)
+  banned     Boolean?  @default(false)
+  banReason  String?   @map("ban_reason")
+  banExpires DateTime? @map("ban_expires") @db.Timestamptz(6)
+
+  // Columna del plugin twoFactor
+  twoFactorEnabled Boolean? @default(false) @map("two_factor_enabled")
+
+  user        User?
+  authSession AuthSession[]
+  authAccount AuthAccount[]
+  twoFactor   TwoFactor[]
+
+  @@map("auth_user")
+}
+
+model AuthSession {
+  id             String   @id @db.VarChar(64)
+  userId         String   @map("user_id") @db.VarChar(64)
+  token          String   @unique @db.VarChar(255)
+  expiresAt      DateTime @map("expires_at") @db.Timestamptz(6)
+  ipAddress      String?  @map("ip_address") @db.VarChar(64)
+  userAgent      String?  @map("user_agent")
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime @default(now()) @map("updated_at") @db.Timestamptz(6)
+  /// Plugin admin: quien esta suplantando a este usuario, si aplica.
+  impersonatedBy String?  @map("impersonated_by") @db.VarChar(64)
+  user           AuthUser @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  @@index([userId])
+  @@map("auth_session")
+}
+
+model AuthAccount {
+  id                    String    @id @db.VarChar(64)
+  userId                String    @map("user_id") @db.VarChar(64)
+  accountId             String    @map("account_id") @db.VarChar(255)
+  providerId            String    @map("provider_id") @db.VarChar(64)
+  password              String?
+  accessToken           String?   @map("access_token")
+  refreshToken          String?   @map("refresh_token")
+  accessTokenExpiresAt  DateTime? @map("access_token_expires_at") @db.Timestamptz(6)
+  refreshTokenExpiresAt DateTime? @map("refresh_token_expires_at") @db.Timestamptz(6)
+  scope                 String?
+  idToken               String?   @map("id_token")
+  createdAt             DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt             DateTime  @default(now()) @map("updated_at") @db.Timestamptz(6)
+  user                  AuthUser  @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  @@unique([providerId, accountId])
+  @@index([userId])
+  @@map("auth_account")
+}
+
+/// Segundo factor por usuario. La administra el plugin twoFactor de Better Auth.
+model TwoFactor {
+  id                      String   @id
+  userId                  String   @map("user_id") @db.VarChar(64)
+  secret                  String
+  backupCodes             String   @map("backup_codes")
+  verified                Boolean? @default(true)
+  failedVerificationCount Int?     @default(0) @map("failed_verification_count")
+  user                    AuthUser @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("two_factor")
+}
+
+model AuthVerification {
+  id         String   @id @db.VarChar(64)
+  identifier String   @db.VarChar(255)
+  value      String   @db.VarChar(255)
+  expiresAt  DateTime @map("expires_at") @db.Timestamptz(6)
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt  DateTime @default(now()) @map("updated_at") @db.Timestamptz(6)
+
+  @@index([identifier])
+  @@map("auth_verification")
+}
+
+enum MetricType {
+  base
+  nested
+
+  @@map("metric_type")
+}
+
+model MetricResource {
+  id                  String                @id @default(dbgenerated("gen_random_uuid()")) @db.VarChar(36)
+  code                String                @unique @db.VarChar(60)
+  name                String                @db.VarChar(180)
+  type                MetricType
+  scope               Json                  @db.JsonB
+  expression          String?
+  /// Como se aplica/calcula este recurso -- texto libre, se llena a futuro. No es identidad, solo documentacion.
+  howApplied          String?               @map("how_applied") @db.VarChar(255)
+  createdAt           DateTime              @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt           DateTime              @default(now()) @map("updated_at") @db.Timestamptz(6)
+  createdBy           Int                   @map("created_by")
+  businessUnitId      Int                   @map("business_unit_id")
+  createdBy2          User                  @relation(fields: [createdBy], references: [id], onDelete: Restrict)
+  businessUnit        BusinessUnit          @relation(fields: [businessUnitId], references: [id], onDelete: Restrict)
+  metricResourceValue MetricResourceValue[]
+  dependsOn           MetricDependency[]    @relation("MetricDependencies")
+  dependents          MetricDependency[]    @relation("MetricDependents")
+
+  @@map("metric_resource")
+}
+
+model MetricResourceValue {
+  id             String         @id @default(dbgenerated("gen_random_uuid()")) @db.VarChar(36)
+  metricId       String         @map("metric_id") @db.VarChar(36)
+  fiscalYearId   Int            @map("fiscal_year_id")
+  /// NULL = valor global (aplica a todo el scope del recurso). No nulo = el valor de ESE casino/departamento especificamente.
+  businessUnitId Int?           @map("business_unit_id")
+  departmentId   Int?           @map("department_id")
+  value          Decimal        @db.Decimal(18, 6)
+  isProjection   Boolean        @default(false) @map("is_projection")
+  createdAt      DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime       @default(now()) @map("updated_at") @db.Timestamptz(6)
+  createdBy      Int            @map("created_by")
+  metric         MetricResource @relation(fields: [metricId], references: [id], onDelete: Restrict)
+  fiscalYear     FiscalYear     @relation(fields: [fiscalYearId], references: [id], onDelete: Restrict)
+  businessUnit   BusinessUnit?  @relation(fields: [businessUnitId], references: [id], onDelete: Restrict)
+  department     Department?    @relation(fields: [departmentId], references: [id], onDelete: Restrict)
+  createdBy2     User           @relation(fields: [createdBy], references: [id], onDelete: Restrict)
+
+  @@unique([metricId, fiscalYearId, businessUnitId, departmentId])
+  @@map("metric_resource_value")
+}
+
+model MetricDependency {
+  metricId          String         @map("metric_id") @db.VarChar(36)
+  dependsOnMetricId String         @map("depends_on_metric_id") @db.VarChar(36)
+  metric            MetricResource @relation("MetricDependencies", fields: [metricId], references: [id], onDelete: Cascade)
+  dependsOnMetric   MetricResource @relation("MetricDependents", fields: [dependsOnMetricId], references: [id], onDelete: Cascade)
+
+  @@id([metricId, dependsOnMetricId])
+  @@map("metric_dependency")
+}
+
+model MetricResourceSnapshot {
+  id            String   @id @default(dbgenerated("gen_random_uuid()")) @db.VarChar(36)
+  finalBudgetId Int      @map("final_budget_id")
+  metricValues  Json     @map("metric_values") @db.JsonB
+  specifiedDate DateTime @map("specified_date") @db.Date
+  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt     DateTime @default(now()) @map("updated_at") @db.Timestamptz(6)
+  createdBy     Int      @map("created_by")
+  budget        Budget   @relation(fields: [finalBudgetId], references: [id], onDelete: Restrict)
+  createdBy2    User     @relation(fields: [createdBy], references: [id], onDelete: Restrict)
+
+  @@map("metric_resource_snapshot")
+}
+
+model MetricDefinition {
+  id             String               @id @default(dbgenerated("gen_random_uuid()")) @db.VarChar(36)
+  name           String               @db.VarChar(150)
+  description    String?
+  unit           MetricUnit
+  granularity    MetricGranularity
+  type           MetricDefinitionType
+  date           DateTime             @db.Date
+  active         Boolean              @default(true)
+  createdAt      DateTime             @default(now()) @map("created_at") @db.Timestamptz(6)
+  metricForecast MetricForecast[]
+  metricTraining MetricTraining[]
+
+  @@map("metric_definition")
+}
+
+model MetricTraining {
+  id             String           @id @default(dbgenerated("gen_random_uuid()")) @db.VarChar(36)
+  metricCode     String           @map("metric_code") @db.VarChar(36)
+  businessUnitId Int              @map("business_unit_id")
+  date           DateTime         @db.Date
+  value          Decimal          @db.Decimal(18, 6)
+  department     Int?
+  account        String?          @db.VarChar(80)
+  subaccount     String?          @db.VarChar(80)
+  createdAt      DateTime         @default(now()) @map("created_at") @db.Timestamptz(6)
+  metricCode2    MetricDefinition @relation(fields: [metricCode], references: [id], onDelete: Restrict)
+  businessUnit   BusinessUnit     @relation(fields: [businessUnitId], references: [id], onDelete: Restrict)
+  department2    Department?      @relation(fields: [department], references: [id], onDelete: Restrict)
+
+  @@index([businessUnitId, date])
+  @@map("metric_training")
+}
+
+model MetricForecast {
+  id              String           @id @default(dbgenerated("gen_random_uuid()")) @db.VarChar(36)
+  metricCode      String           @map("metric_code") @db.VarChar(36)
+  businessUnitId  Int              @map("business_unit_id")
+  date            DateTime         @db.Date
+  predictedValue  Decimal          @map("predicted_value") @db.Decimal(18, 6)
+  lowerBound      Decimal?         @map("lower_bound") @db.Decimal(18, 6)
+  upperBound      Decimal?         @map("upper_bound") @db.Decimal(18, 6)
+  confidenceLevel Decimal?         @map("confidence_level") @db.Decimal(5, 4)
+  model           String?          @db.VarChar(60)
+  modelVersion    String?          @map("model_version") @db.VarChar(40)
+  generatedAt     DateTime         @default(now()) @map("generated_at") @db.Timestamptz(6)
+  department      Int?
+  account         String?          @db.VarChar(80)
+  subaccount      String?          @db.VarChar(80)
+  metricCode2     MetricDefinition @relation(fields: [metricCode], references: [id], onDelete: Restrict)
+  businessUnit    BusinessUnit     @relation(fields: [businessUnitId], references: [id], onDelete: Restrict)
+  department2     Department?      @relation(fields: [department], references: [id], onDelete: Restrict)
+
+  @@index([businessUnitId, date])
+  @@map("metric_forecast")
+}
+
+/// Lo presupuestado de una metrica de ingresos (Ingresos Maquinas, DAU...)
+/// por casino y mes, en el ejercicio que se presupuesta. Es la hoja de
+/// Ingresos y metas: cada mes guarda que opcion del modelo se eligio
+/// ("predicted" | "lower" | "upper", "y2025" para el cierre de ese año) o
+/// "manual" cuando se capturo a mano, igual que budget_line_month.
+model MetricBudgetMonth {
+  id             Int          @id @default(autoincrement())
+  fiscalYearId   Int          @map("fiscal_year_id")
+  businessUnitId Int          @map("business_unit_id")
+  /// Nombre de la metrica (metric_definition.name): la de pronostico y la de
+  /// entrenamiento comparten nombre y no id.
+  metric         String       @db.VarChar(150)
+  month          Month
+  amount         Decimal      @default(0) @db.Decimal(18, 4)
+  variant        String?      @db.VarChar(20)
+  isOverride     Boolean      @default(false) @map("is_override")
+  overrideReason String?      @map("override_reason") @db.VarChar(255)
+  updatedBy      Int?         @map("updated_by")
+  updatedAt      DateTime     @default(now()) @map("updated_at") @db.Timestamptz(6)
+  fiscalYear     FiscalYear   @relation(fields: [fiscalYearId], references: [id], onDelete: Restrict)
+  businessUnit   BusinessUnit @relation(fields: [businessUnitId], references: [id], onDelete: Restrict)
+
+  @@unique([fiscalYearId, businessUnitId, metric, month])
+  @@index([fiscalYearId, metric])
+  @@map("metric_budget_month")
+}
